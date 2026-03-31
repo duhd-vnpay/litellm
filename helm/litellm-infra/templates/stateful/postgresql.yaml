@@ -1,0 +1,85 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-postgresql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-postgresql
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app: litellm-postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-postgresql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-postgresql
+spec:
+  serviceName: litellm-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-postgresql
+  template:
+    metadata:
+      labels:
+        app: litellm-postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: {{ .Values.postgresql.image }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: password
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.database }}
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            failureThreshold: 30
+            periodSeconds: 2
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.postgresql.storageClass }}
+        storageClassName: {{ .Values.postgresql.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.storage }}
+{{- end }}

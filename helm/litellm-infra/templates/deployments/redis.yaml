@@ -1,0 +1,65 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-redis
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-redis
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: 6379
+  selector:
+    app: litellm-redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-redis
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-redis
+  template:
+    metadata:
+      labels:
+        app: litellm-redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          command:
+            - redis-server
+            - --maxmemory
+            - {{ .Values.redis.maxMemory }}
+            - --maxmemory-policy
+            - allkeys-lru
+            - --save
+            - ""
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          ports:
+            - containerPort: 6379
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-provider-keys
+                  key: REDIS_PASSWORD
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -a $REDIS_PASSWORD ping"]
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -a $REDIS_PASSWORD ping"]
+            periodSeconds: 5
+{{- end }}
