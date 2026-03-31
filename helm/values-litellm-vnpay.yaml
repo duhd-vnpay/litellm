@@ -9,9 +9,15 @@ replicaCount: 2
 # numWorkers: 2
 
 image:
+  # SECURITY: Pin to exact digest, NOT mutable tags like main-stable/main-latest
+  # Supply chain incident 2026-03-24: v1.82.7/v1.82.8 compromised by TeamPCP (credential stealer)
+  # Current image runs v1.82.3 (verified clean). Update ONLY after manual review.
+  # Digest: sha256:7c51011535fc9347fc306c8ed7d2e4cdda2336ffd91d930a35fdccd034f2ec17
+  # Ref: https://docs.litellm.ai/blog/security-update-march-2026
   repository: ghcr.io/berriai/litellm-database
   pullPolicy: IfNotPresent
   tag: "main-stable"
+  # To upgrade: verify new version is clean, update tag, run `helm upgrade`, then update digest comment
 
 # ─── Database (use litellm-infra's PostgreSQL) ────────────────────────────────
 db:

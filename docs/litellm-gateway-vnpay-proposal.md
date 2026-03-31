@@ -211,6 +211,21 @@ litellm_settings:
         default_on: true
 ```
 
+### Supply Chain Security - Bài học từ sự cố 24/03/2026
+
+> **Context**: Ngày 24/03/2026, hacker nhóm **TeamPCP** đã upload 2 phiên bản độc hại (v1.82.7, v1.82.8) lên PyPI thông qua token bị đánh cắp từ CI/CD pipeline. Payload thu thập API keys, SSH keys, K8s tokens, cloud credentials và gửi về server của attacker. Phiên bản độc hại tồn tại ~3 giờ trước khi bị gỡ. Deployment VNPAY dùng v1.82.3 - **KHÔNG bị ảnh hưởng**.
+
+Các biện pháp đã áp dụng để hạn chế rủi ro:
+
+| Biện pháp | Chi tiết |
+|-----------|----------|
+| **Pin image digest** | Image K8s pin theo SHA256 digest cụ thể, không dùng mutable tag (`main-latest`, `main-stable`) |
+| **Không dùng PyPI trực tiếp** | Deploy qua Docker image (ghcr.io), không `pip install` runtime - tránh bị ảnh hưởng bởi PyPI compromise |
+| **IOC scan trước upgrade** | Trước mỗi lần upgrade, kiểm tra: không có file `.pth` lạ, không có domain `models.litellm.cloud` / `checkmarx.zone` |
+| **Secrets isolation** | Provider API keys nằm trong K8s SealedSecrets, developer chỉ nhận virtual key - nếu gateway bị compromise, key gốc không bị lộ |
+| **Network policy** | LiteLLM pods chỉ được gọi ra Anthropic/OpenAI API endpoints, không gọi được domain lạ |
+| **Upgrade quy trình** | Mọi upgrade phải qua review: check release notes -> verify image -> scan IOCs -> deploy staging -> deploy prod |
+
 ### Linh hoạt & Tối ưu
 - **Multi-provider**: Chuyển đổi giữa Anthropic/OpenAI/Gemini không cần đổi code
 - **Fallback tự động**: Model A lỗi -> tự động chuyển sang Model B
