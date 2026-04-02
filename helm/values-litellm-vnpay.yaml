@@ -46,46 +46,24 @@ environmentSecrets:
 # ─── Proxy Config ─────────────────────────────────────────────────────────────
 proxy_config:
   model_list:
-    # ── Anthropic models ──
-    - model_name: claude-sonnet-4-6
+    # ── VNPAY GenAI Gateway (on-premise GLM-4) ──
+    - model_name: v_glm46
       litellm_params:
-        model: anthropic/claude-sonnet-4-6-20250514
-        api_key: os.environ/ANTHROPIC_API_KEY
-    - model_name: claude-opus-4-6
-      litellm_params:
-        model: anthropic/claude-opus-4-6-20250514
-        api_key: os.environ/ANTHROPIC_API_KEY
-    - model_name: claude-haiku-4-5-20251001
-      litellm_params:
-        model: anthropic/claude-haiku-4-5-20251001
-        api_key: os.environ/ANTHROPIC_API_KEY
-    # Claude Code default model names (so it works without env overrides)
-    - model_name: claude-sonnet-4-5-20250929
-      litellm_params:
-        model: anthropic/claude-sonnet-4-5-20250929
-        api_key: os.environ/ANTHROPIC_API_KEY
-    - model_name: claude-opus-4-5-20251101
-      litellm_params:
-        model: anthropic/claude-opus-4-5-20251101
-        api_key: os.environ/ANTHROPIC_API_KEY
-
-    # ── OpenAI models ──
-    - model_name: gpt-4o
-      litellm_params:
-        model: openai/gpt-4o
-        api_key: os.environ/OPENAI_API_KEY
-    - model_name: o3-pro
-      litellm_params:
-        model: openai/o3-pro
-        api_key: os.environ/OPENAI_API_KEY
+        model: openai/v_glm46
+        api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
+        api_key: os.environ/VNPAY_GENAI_API_KEY
+        model_info:
+          id: v_glm46
 
     # Additional providers can be added via UI (store_model_in_db: true)
 
   general_settings:
     master_key: os.environ/PROXY_MASTER_KEY
     store_model_in_db: true
+    enable_content_filtering: false
 
   litellm_settings:
+    request_timeout: 300
     cache: true
     cache_params:
       type: redis

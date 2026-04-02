@@ -1,6 +1,6 @@
 # LiteLLM Gateway - Unified AI Platform cho VNPAY
 
-> **Tài liệu nội bộ** | Ngày: 31/03/2026 | Người trình bày: DuHD - AI Platform Team
+> **Tài liệu nội bộ** | Ngày: 02/04/2026 | Người trình bày: DuHD - AI Platform Team
 > **Đối tượng**: CTO, Tech Leaders, Engineering Managers
 
 ---
@@ -22,9 +22,9 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
 ```
           Consumers (gửi request)
           ========================
-     Claude Code    Antigravity      Hệ thống nội bộ
-     (Developer)    (AI Agent)       (Chatbot, QA,
-                                      Automation...)
+     Claude Code      Antigravity      Hệ thống nội bộ
+     CLI / VSCode /   (AI Agent)       (Chatbot, QA,
+     Xcode                              Automation...)
           |               |               |
           +---------------+---------------+
                           |
@@ -39,10 +39,10 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
           +-------+-------+-------+-------+-------+
           |       |       |       |       |       |
           v       v       v       v       v       v
-      Anthropic OpenAI  Gemini DeepSeek  Groq   Ollama
-      Claude    GPT-4o  Gemini  DeepSeek Llama  (On-premise)
-      Opus/     o3-pro  2.5     R1       3.3    Qwen, Llama
-      Sonnet    Codex   Flash                   CodeGemma...
+      VNPAY    Anthropic OpenAI  Gemini DeepSeek Ollama
+      GenAI    Claude    GPT-4o  Gemini  DeepSeek (On-premise)
+      GLM-4    Opus/     o3-pro  2.5     R1       Qwen, Llama
+      (v_glm46)Sonnet    Codex   Flash             CodeGemma...
           ========================
           Providers (LLM backends)
 ```
@@ -50,17 +50,36 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
 ## 3. Kiến trúc triển khai tại VNPayCloud
 
 ```
+                    Developer / Service
+                          |
+                          | HTTPS
+                          v
+                   VNPayCloud WAF/CDN
+               (api-llm.x.vnshop.cloud)
+                          |
+                          v
+                Floating IP: 103.67.184.237
+                          |
+                          v
 +------------------------------------------------------------------+
 |                      VNPayCloud K8s Cluster                      |
 |                      (sdlc-go-k8s-v2)                            |
 |                                                                  |
+|            LB VIP: 10.10.1.87 (SG: WAF IPs allowlist)           |
+|                          |                                       |
+|              NodePort 30080/30443                                |
+|                          |                                       |
+|              NGINX Ingress Controller                            |
+|              ├── api-llm.x.vnshop.cloud  (public, WAF whitelist) |
+|              └── litellm.x.vnshop.cloud  (admin, Teleport only)  |
+|                          |                                       |
 |  +--- Namespace: litellm -----------------------------------+    |
 |  |                                                          |    |
 |  |  +------------------+    +------------+    +---------+   |    |
 |  |  | LiteLLM Gateway  |    | PostgreSQL |    |  Redis  |   |    |
-|  |  | (2 replicas, HA) |--->| 16-alpine  |    | Cache   |   |    |
+|  |  | (2 replicas, HA) |    | 16-alpine  |    | Cache   |   |    |
 |  |  | Port: 4000       |    | Keys, Teams|    | Rate    |   |    |
-|  |  |                  |--->| Usage Logs |    | Limit   |   |    |
+|  |  |                  |    | Usage Logs |    | Limit   |   |    |
 |  |  | - Guardrails     |    +------------+    +---------+   |    |
 |  |  | - Key Mgmt       |         5Gi PVC                    |    |
 |  |  | - Cost Tracking  |                                    |    |
@@ -71,14 +90,15 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
 |              |                                                   |
 |  +--- Namespace: sdlc-go-prod ---+  +--- Namespace: teleport -+ |
 |  | GoClaw, Web Dashboard,       |  | Teleport Agent          | |
-|  | Serena, GitNexus ...          |  | (SSO + MFA gateway)     | |
+|  | Serena, GitNexus ...          |  | (SSO + MFA, admin UI)   | |
 |  +-------------------------------+  +-------------------------+ |
 |                                                                  |
 +------------------------------------------------------------------+
        |                    |                         |
        v                    v                         v
-   Anthropic API       OpenAI API              Ollama Server
-   (Cloud)             (Cloud)                 (On-premise)
+   VNPAY GenAI         Anthropic API            Ollama Server
+   genai.vnpay.vn      (Cloud)                  (On-premise)
+   (GLM-4, on-premise)                          (Future)
 ```
 
 | Thành phần | Chi tiết |
@@ -88,13 +108,15 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
 | **HA** | 2 replicas LiteLLM + PodDisruptionBudget, zero-downtime rolling upgrade |
 | **Database** | PostgreSQL 16 riêng (lưu virtual keys, teams, usage logs, model config) |
 | **Cache** | Redis (response cache, rate limiting, session state) |
-| **Ingress** | NGINX Ingress Controller, TLS wildcard `*.x.vnshop.cloud` |
-| **Bảo mật** | Teleport Zero Trust (SSO + MFA), SealedSecrets cho credentials, Guardrails |
+| **Public API** | `api-llm.x.vnshop.cloud` → WAF/CDN → Floating IP `103.67.184.237` → LB → Ingress |
+| **Admin UI** | `litellm.x.vnshop.cloud` → Teleport SSO + MFA (admin only) |
+| **WAF** | VNPayCloud WAF/CDN (14 WAF IPs whitelist tại NGINX Ingress) |
+| **TLS** | Wildcard cert `*.x.vnshop.cloud` (WAF terminate TLS, internal HTTP) |
+| **Bảo mật** | WAF IP whitelist, LiteLLM API key auth, SealedSecrets cho provider credentials |
 | **Monitoring** | Jaeger (request tracing), Grafana (cost dashboard), Prometheus metrics |
-| **Truy cập Pilot** | Qua Teleport: `litellm.x.vnshop.cloud` (không expose internet) |
-| **Truy cập Prod** | Public endpoint + device pairing qua email `@vnpay.vn` |
+| **Models hiện tại** | `v_glm46` (VNPAY GenAI GLM-4 on-premise) — tested & verified |
 
-**Bảo mật giai đoạn Pilot**: Không expose ra internet. Mọi truy cập đều qua **Teleport** (Zero Trust Access) với xác thực SSO VNPAY. API keys provider (Anthropic, OpenAI...) lưu encrypted trong K8s SealedSecrets, developer không bao giờ thấy key gốc - chỉ nhận virtual key có rate limit và budget.
+**Truy cập hiện tại**: Public endpoint `https://api-llm.x.vnshop.cloud` qua WAF/CDN. Developer chỉ cần API key, không cần VPN hay Teleport. Admin dashboard qua Teleport SSO tại `litellm.x.vnshop.cloud`.
 
 ## 4. Lợi ích Enterprise
 
@@ -105,61 +127,65 @@ LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất c
 - **Một hóa đơn**: Thay vì mỗi dev tự mua credits riêng
 
 ### Bảo mật & Compliance
-- **Zero Trust (Pilot)**: Truy cập qua Teleport SSO + MFA, không expose public internet
-- **Device Pairing (Prod)**: Public endpoint nhưng chỉ chấp nhận paired devices - xác thực qua email `@vnpay.vn`, key bound to device, revoke khi mất thiết bị hoặc nghỉ việc
-- **Audit log**: Ghi nhận mọi request - ai, từ device nào, lúc nào, model nào, bao nhiêu tokens
+- **WAF/CDN**: Traffic qua VNPayCloud WAF trước khi tới gateway, chống DDoS và injection
+- **API Key Auth**: Mọi request cần virtual key hợp lệ, key có rate limit và budget
+- **Audit log**: Ghi nhận mọi request - ai, lúc nào, model nào, bao nhiêu tokens
 - **Key rotation**: Thay đổi API key provider mà không ảnh hưởng người dùng (virtual key tách biệt khỏi provider key)
-- **Data sovereignty**: Gateway chạy trên VNPayCloud, dữ liệu nhạy cảm route qua Ollama on-premise (zero data egress)
+- **Data sovereignty**: Gateway chạy trên VNPayCloud, dữ liệu nhạy cảm route qua VNPAY GenAI on-premise (zero data egress)
 - **Guardrails**: PII auto-redaction, prompt injection blocking, data leak prevention - filter tại gateway trước khi data rời infra
+- **Admin UI bảo mật**: Dashboard quản trị chỉ truy cập qua Teleport SSO + MFA
 
-### On-premise Models với Ollama
+### On-premise Models: VNPAY GenAI & Ollama
 
-LiteLLM hỗ trợ kết nối **Ollama** - chạy LLM trực tiếp trên server nội bộ VNPAY, **dữ liệu không bao giờ rời khỏi datacenter**:
+LiteLLM hỗ trợ kết nối các LLM chạy trực tiếp trên hạ tầng nội bộ VNPAY, **dữ liệu không bao giờ rời khỏi datacenter**:
 
 ```
   LiteLLM Gateway
        |
-       +---> Cloud: Anthropic, OpenAI, Gemini (qua internet)
+       +---> VNPAY GenAI: genai.vnpay.vn (GLM-4, đã triển khai)
        |
-       +---> On-premise: Ollama Server (mạng nội bộ VNPAY)
+       +---> Cloud: Anthropic, OpenAI, Gemini (khi cần model mạnh)
+       |
+       +---> Ollama Server (future, mạng nội bộ VNPAY)
               GPU Server / VNPayCloud VM
               ├── qwen2.5-coder:32b    (coding, 32B params)
               ├── llama3.3:70b         (general, 70B params)
               ├── codegemma:7b         (code review, nhẹ)
-              ├── deepseek-r1:14b      (reasoning)
-              └── gemma3:27b           (tiếng Việt tốt)
+              └── deepseek-r1:14b      (reasoning)
 ```
 
-**Cấu hình đơn giản** - thêm Ollama vào `config.yaml` hoặc qua Dashboard UI:
+**Cấu hình** - thêm model qua `config.yaml` hoặc Dashboard UI:
 
 ```yaml
 model_list:
-  # On-premise models (Ollama) - data stays in VNPAY
+  # VNPAY GenAI Gateway (on-premise, đã triển khai)
+  - model_name: v_glm46
+    litellm_params:
+      model: openai/v_glm46
+      api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
+      api_key: os.environ/VNPAY_GENAI_API_KEY
+
+  # Ollama models (on-premise, future)
   - model_name: qwen-coder-local
     litellm_params:
       model: ollama/qwen2.5-coder:32b
       api_base: http://ollama-server.vnpay.internal:11434
-
-  - model_name: llama-local
-    litellm_params:
-      model: ollama/llama3.3:70b
-      api_base: http://ollama-server.vnpay.internal:11434
 ```
 
-**Lợi ích on-premise:**
+**So sánh Cloud vs On-premise:**
 
-| | Cloud Models | Ollama On-premise |
+| | Cloud Models | On-premise (VNPAY GenAI / Ollama) |
 |---|---|---|
-| **Chi phí** | Pay-per-token | Một lần (GPU server) - chạy unlimited |
+| **Chi phí** | Pay-per-token | Hạ tầng sẵn có - chạy unlimited |
 | **Dữ liệu** | Gửi ra internet (có Guardrails filter) | 100% nội bộ - zero data egress |
-| **Latency** | ~500ms-2s (phụ thuộc provider) | ~100-500ms (mạng LAN) |
+| **Latency** | ~500ms-2s (phụ thuộc provider) | ~100-500ms (mạng nội bộ) |
 | **Compliance** | Phụ thuộc DPA với provider | Hoàn toàn kiểm soát |
 | **Use case** | Task phức tạp cần model mạnh | Code review, dịch thuật, phân tích log, dữ liệu nhạy cảm |
 
 **Hybrid routing** - LiteLLM tự động route theo policy:
-- Dữ liệu nhạy cảm (tài chính, PII) -> route tới **Ollama on-premise**
+- Dữ liệu nhạy cảm (tài chính, PII) -> route tới **VNPAY GenAI on-premise**
 - Task cần model mạnh (kiến trúc, debug phức tạp) -> route tới **Claude/GPT-4o cloud**
-- Task đơn giản (format code, tóm tắt) -> route tới **Ollama on-premise** (tiết kiệm chi phí)
+- Task đơn giản (format code, tóm tắt) -> route tới **on-premise** (tiết kiệm chi phí)
 
 ### AI Security Guardrails
 
@@ -227,164 +253,170 @@ Các biện pháp đã áp dụng để hạn chế rủi ro:
 | **Upgrade quy trình** | Mọi upgrade phải qua review: check release notes -> verify image -> scan IOCs -> deploy staging -> deploy prod |
 
 ### Linh hoạt & Tối ưu
-- **Multi-provider**: Chuyển đổi giữa Anthropic/OpenAI/Gemini không cần đổi code
+- **Multi-provider**: Chuyển đổi giữa VNPAY GenAI/Anthropic/OpenAI/Gemini không cần đổi code
 - **Fallback tự động**: Model A lỗi -> tự động chuyển sang Model B
 - **Load balancing**: Phân tải request qua nhiều API keys cùng provider
-- **Model routing**: Dùng model rẻ (Haiku) cho task đơn giản, model mạnh (Opus) cho task phức tạp
+- **Model routing**: Dùng model on-premise cho task thường, model cloud cho task phức tạp
 
 ## 5. Hướng dẫn sử dụng
 
-### 5.1 Claude Code (AI Coding Assistant)
+### 5.1 Claude Code CLI (Terminal)
 
-Claude Code là CLI coding assistant của Anthropic - hỗ trợ viết code, debug, review, deploy.
+Claude Code CLI là coding assistant chạy trực tiếp trong terminal - đọc/sửa code, chạy tests, tạo PR, debug, refactor codebase lớn. Hỗ trợ context 1 triệu tokens.
+
+**Cấu hình (chỉ cần làm 1 lần):**
 
 ```bash
-# Bước 1: Login Teleport (một lần/ngày)
-tsh login --proxy=teleport.x.vnshop.cloud --user=<tên>@vnpay.vn
-
-# Bước 2: Mở proxy tới LiteLLM
-tsh proxy app litellm -p 14000 &
-
-# Bước 3: Cấu hình Claude Code
-export ANTHROPIC_BASE_URL="http://127.0.0.1:14000"
+# Set environment variables (thêm vào ~/.bashrc hoặc ~/.zshrc)
+export ANTHROPIC_BASE_URL="https://api-llm.x.vnshop.cloud"
 export ANTHROPIC_AUTH_TOKEN="<virtual-key-được-cấp>"
+```
 
-# Bước 4: Sử dụng
+**Sử dụng:**
+
+```bash
 claude                           # Mở Claude Code
-claude --model claude-opus-4-6   # Dùng model cụ thể
+claude --model v_glm46           # Dùng VNPAY GLM-4 on-premise
+claude --model claude-sonnet-4-6 # Dùng Claude Sonnet (khi có Anthropic credits)
 ```
 
-**Tính năng nổi bật**: Đọc/sửa code trực tiếp, chạy tests, tạo PR, debug lỗi phức tạp, refactor codebase lớn. Hỗ trợ context 1 triệu tokens (đọc toàn bộ codebase cùng lúc).
+### 5.2 Claude Code trong VS Code
 
-### 5.2 Antigravity (AI Agent Platform)
+Claude Code tích hợp trực tiếp vào VS Code qua extension, hoạt động như AI pair-programmer ngay trong IDE.
 
-Antigravity và các AI agent platform kết nối LiteLLM qua OpenAI-compatible API:
+**Cài đặt:**
+
+1. VS Code → Extensions → Tìm **"Claude Code"** → Install
+2. Mở Settings (Ctrl+,) → tìm "claude" → cấu hình:
+
+```json
+// VS Code settings.json
+{
+  "claude-code.anthropicBaseUrl": "https://api-llm.x.vnshop.cloud",
+  "claude-code.anthropicAuthToken": "<virtual-key-được-cấp>"
+}
+```
+
+Hoặc cấu hình qua environment variables (tự động nhận từ terminal):
+
+```bash
+# Thêm vào ~/.bashrc hoặc ~/.zshrc (dùng chung với CLI)
+export ANTHROPIC_BASE_URL="https://api-llm.x.vnshop.cloud"
+export ANTHROPIC_AUTH_TOKEN="<virtual-key-được-cấp>"
+```
+
+**Tính năng trong VS Code:**
+- Chat panel tích hợp bên phải IDE
+- Chọn code → right-click → "Ask Claude" để hỏi về đoạn code
+- Inline code suggestions và auto-complete
+- Đọc toàn bộ workspace context (files, git history, terminal output)
+- Chạy commands, edit files, tạo PR trực tiếp từ chat
+
+### 5.3 Claude Code trong Xcode (macOS Apple Silicon)
+
+Xcode 26.3+ tích hợp Claude Code native. Kết nối qua LiteLLM Gateway với vài bước:
+
+**Yêu cầu:** macOS 26.2+, Xcode 26.3+, Mac Apple Silicon (M1/M2/M3/M4)
+
+**Bước 1: Cài Claude Code component**
+
+Xcode → Settings → Intelligence → Anthropic → Claude Agent → **Get**
+
+**Bước 2: Bypass authentication mặc định**
+
+```bash
+defaults write com.apple.dt.Xcode IDEChatClaudeAgentAPIKeyOverride ' '
+```
+
+**Bước 3: Cấu hình endpoint LiteLLM**
+
+```bash
+mkdir -p ~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig
+```
+
+Tạo file `~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "<virtual-key-được-cấp>",
+    "ANTHROPIC_BASE_URL": "https://api-llm.x.vnshop.cloud"
+  }
+}
+```
+
+**Bước 4:** Restart Xcode
+
+**Troubleshooting:** Logs tại `~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/debug/`
+
+> Ref: https://gist.github.com/zoltan-magyar/be846eb36cf5ee33c882ef5f932b754b
+
+### 5.4 Antigravity & hệ thống nội bộ
+
+Antigravity và các AI agent/service kết nối LiteLLM qua OpenAI-compatible API:
 
 ```
-Base URL:  http://litellm.litellm.svc.cluster.local:4000  (trong K8s)
-           https://litellm.x.vnshop.cloud                  (qua Teleport)
+Base URL:  https://api-llm.x.vnshop.cloud      (public qua WAF)
 API Key:   <virtual-key-được-cấp-cho-service>
+```
+
+**Từ K8s pods** (bypass WAF, gọi thẳng Floating IP):
+```
+Base URL:  http://api-llm.x.vnshop.cloud       (HTTP qua Floating IP)
+hostAlias: 103.67.184.237 api-llm.x.vnshop.cloud
 ```
 
 Hỗ trợ chuẩn OpenAI API (`/v1/chat/completions`) và Anthropic API (`/v1/messages`), tương thích mọi SDK/framework hiện có.
 
-### 5.3 ChatGPT & OpenAI Models
+### 5.5 OpenAI SDK / Python / Node.js
 
-Sử dụng GPT-4o, o3-pro qua cùng gateway - không cần API key OpenAI riêng:
+Sử dụng bất kỳ model nào qua cùng gateway - không cần API key riêng từng provider:
 
 ```bash
-# Từ bất kỳ OpenAI SDK/client nào
-export OPENAI_BASE_URL="http://127.0.0.1:14000/v1"
+# Environment variables
+export OPENAI_BASE_URL="https://api-llm.x.vnshop.cloud/v1"
 export OPENAI_API_KEY="<virtual-key-được-cấp>"
+```
 
+```python
 # Python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:14000/v1", api_key="<key>")
+client = OpenAI(base_url="https://api-llm.x.vnshop.cloud/v1", api_key="<key>")
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="v_glm46",
     messages=[{"role": "user", "content": "Phân tích kiến trúc microservice"}]
 )
 ```
+
+### 5.6 Tổng hợp endpoints
+
+| Endpoint | Mục đích | Truy cập |
+|----------|----------|----------|
+| `https://api-llm.x.vnshop.cloud` | API cho Claude Code, SDK, services | Public qua WAF, chỉ cần API key |
+| `https://litellm.x.vnshop.cloud` | Dashboard UI quản trị | Qua Teleport SSO (admin only) |
+| `http://api-llm.x.vnshop.cloud` | K8s services nội bộ | Qua Floating IP + hostAlias (bypass WAF) |
 
 ## 6. Mô hình quản lý Team & Key
 
 | Team | Mục đích | Models | Budget/tháng |
 |------|----------|--------|--------------|
-| **platform** | GoClaw, CI/CD automation | Claude Sonnet, Opus | Theo dự án |
+| **platform** | GoClaw, CI/CD automation | v_glm46, Claude Sonnet | Theo dự án |
 | **dev-tools** | Claude Code cho developers | All models | Theo headcount |
-| **products** | Chatbot, AI features | Haiku, GPT-4o | Theo sản phẩm |
+| **products** | Chatbot, AI features | v_glm46, Haiku | Theo sản phẩm |
 | **research** | Nghiên cứu, PoC | All models | Cố định |
 
-Mỗi developer/service nhận **virtual key** riêng. Admin quản lý qua **LiteLLM Dashboard** (web UI) tại `litellm.x.vnshop.cloud/ui` - không cần SSH hay kubectl.
+Mỗi developer/service nhận **virtual key** riêng. Admin quản lý qua **LiteLLM Dashboard** (web UI) tại `litellm.x.vnshop.cloud/ui` - truy cập qua Teleport SSO.
 
-## 7. Roadmap & Mô hình truy cập theo giai đoạn
+## 7. Roadmap
 
-### Giai đoạn Pilot (Tuần 1-4): Truy cập qua Teleport
-
-```
-Developer laptop                    VNPayCloud K8s
-+-------------------+              +---------------------+
-| tsh proxy app     |   Teleport   |                     |
-| litellm -p 14000  |=============>| LiteLLM Gateway     |
-|                   |  (encrypted) | :4000               |
-| Claude Code       |              |   -> Anthropic API  |
-| Antigravity       |              |   -> OpenAI API     |
-+-------------------+              +---------------------+
-     Mạng nội bộ                      Private network
-```
-
-- Truy cập **chỉ qua Teleport** (`tsh login` + `tsh proxy app`)
-- Phù hợp nhóm pilot 5-10 developers đã quen Teleport
-- Không cần thay đổi infra, bảo mật tối đa
-- Mỗi developer cần chạy `tsh proxy app litellm -p 14000` trước khi dùng
-
-| Phase | Thời gian | Nội dung |
-|-------|-----------|----------|
-| **Phase 1** (Done) | Tuần 1 | Deploy LiteLLM Gateway, test Claude Code |
-| **Phase 2** | Tuần 2 | Onboard 5-10 developers pilot qua Teleport, setup teams & budgets |
-| **Phase 3** | Tuần 3-4 | Migrate GoClaw sang LiteLLM, thêm OpenAI/Gemini providers |
-
-### Giai đoạn Production (Tháng 2+): Public API Gateway + Device Pairing
-
-```
-Developer laptop                         VNPayCloud K8s
-+-------------------+                   +---------------------+
-|                   |    HTTPS/TLS      |  Public Endpoint    |
-| Claude Code       |==================>|  api.ai.vnpay.vn    |
-| Antigravity       |  (direct, no VPN) |                     |
-| ChatGPT client    |                   |  LiteLLM Gateway    |
-+-------------------+                   |  + SSO Auth         |
-        |                               |  + Device Pairing   |
-        v                               +---------------------+
-  Pairing flow:
-  1. Dev truy cập api.ai.vnpay.vn/pair
-  2. Nhập email @vnpay.vn
-  3. Nhận mã xác thực qua email
-  4. Nhập mã -> device được pair
-  5. Nhận virtual key (bound to device)
-```
-
-Khi mở rộng toàn công ty, chuyển sang **public endpoint** để developer không cần Teleport:
-
-**Device Pairing Flow:**
-
-| Bước | Hành động | Chi tiết |
-|------|-----------|----------|
-| 1 | **Request pairing** | Developer truy cập portal hoặc chạy CLI setup command |
-| 2 | **Email verification** | Hệ thống gửi mã OTP tới email `@vnpay.vn` của developer |
-| 3 | **Xác thực mã** | Developer nhập mã OTP, device fingerprint được ghi nhận |
-| 4 | **Cấp virtual key** | Key được bind với device ID + email, có thời hạn (90 ngày) |
-| 5 | **Auto-renewal** | Key tự gia hạn khi device vẫn active, revoke khi device mất/đổi |
-
-**Lợi ích so với Teleport-only:**
-- **Không cần VPN/Teleport**: Developer chỉ cần internet, không cần `tsh` CLI
-- **Onboarding nhanh**: Tự đăng ký qua email, không cần admin cấp thủ công
-- **Device management**: Revoke key khi nhân viên nghỉ việc hoặc mất thiết bị
-- **Audit per-device**: Biết chính xác request đến từ thiết bị nào
-
-**Bảo mật production:**
-- Endpoint public nhưng **chỉ chấp nhận paired devices** - request không có valid key bị reject
-- Virtual key **bound to device** - copy key sang máy khác sẽ không hoạt động
-- Rate limiting per-device + per-team budget controls
-- Guardrails (PII redaction, prompt injection blocking) vẫn active
-- TLS encryption end-to-end
-
-| Phase | Thời gian | Nội dung |
-|-------|-----------|----------|
-| **Phase 4** | Tháng 2 | Public endpoint `api.ai.vnpay.vn`, device pairing system |
-| **Phase 5** | Tháng 2-3 | Onboard toàn công ty, Grafana cost dashboard, self-service portal |
-| **Phase 6** | Tháng 3+ | SSO integration (VNPAY AD), auto-provisioning theo phòng ban |
-
-### So sánh hai giai đoạn
-
-| | Pilot (Teleport) | Production (Public + Pairing) |
-|---|---|---|
-| **Truy cập** | `tsh proxy app` (cần Teleport CLI) | Direct HTTPS (chỉ cần internet) |
-| **Onboarding** | Admin cấp key thủ công | Self-service qua email @vnpay.vn |
-| **Số user** | 5-10 developers | Toàn công ty (100+) |
-| **Setup time** | 5 phút (đã có Teleport) | 2 phút (pair device qua email) |
-| **Yêu cầu** | Teleport account + tsh CLI | Email @vnpay.vn + internet |
-| **Bảo mật** | Zero Trust (Teleport) | Device-bound keys + TLS + Guardrails |
+| Phase | Thời gian | Nội dung | Status |
+|-------|-----------|----------|--------|
+| **Phase 1** | Tuần 1 | Deploy LiteLLM Gateway, public endpoint qua WAF | **Done** |
+| **Phase 2** | Tuần 2 | Onboard 5-10 developers, setup teams & budgets | In progress |
+| **Phase 3** | Tuần 3-4 | Migrate GoClaw sang LiteLLM, thêm Anthropic/OpenAI credits | Planned |
+| **Phase 4** | Tháng 2 | Grafana cost dashboard, Guardrails config, backup | Planned |
+| **Phase 5** | Tháng 2-3 | Onboard toàn công ty, self-service portal | Planned |
+| **Phase 6** | Tháng 3+ | SSO integration (VNPAY AD), device pairing, Ollama on-premise | Planned |
 
 ## 8. Chi phí ước tính
 
@@ -392,13 +424,15 @@ Khi mở rộng toàn công ty, chuyển sang **public endpoint** để develope
 |-----------|---------|
 | **Hạ tầng** (K8s, VNPayCloud) | Dùng chung cluster hiện tại - không phát sinh thêm |
 | **LiteLLM** | Open-source, miễn phí |
+| **VNPAY GenAI** (v_glm46) | Hạ tầng nội bộ sẵn có - không phát sinh thêm |
 | **API Usage** (Anthropic, OpenAI) | Theo usage thực tế, kiểm soát qua budget limits |
-| **Public endpoint** (Phase 4) | Floating IP + domain DNS - chi phí minimal |
+| **WAF/CDN + Floating IP** | Chi phí minimal |
 
 **ROI**: Với 20 developers dùng Claude Code, tiết kiệm ước tính **3-5 giờ/dev/tuần** cho coding tasks. Kiểm soát chi phí AI tập trung thay vì phân tán qua nhiều tài khoản cá nhân.
 
 ---
 
-**Liên hệ**: Du HD (duhd@vnpay.vn) - AI Platform Team
-**Dashboard**: https://litellm.x.vnshop.cloud (qua Teleport SSO)
-**Status**: Phase 1 hoàn tất - Gateway đang chạy production trên VNPayCloud
+**Liên hệ**: DuHD (duhd@vnpay.vn) - AI Platform Team
+**Public API**: https://api-llm.x.vnshop.cloud
+**Admin Dashboard**: https://litellm.x.vnshop.cloud (qua Teleport SSO)
+**Status**: Phase 1 hoàn tất - Gateway đang chạy production, `v_glm46` tested OK

@@ -1,0 +1,54 @@
+# RBAC: Grant goclaw-ops read-only access to namespace "litellm"
+# Apply: kubectl apply -f rbac-litellm-readonly.yaml
+# Purpose: Allow Scotty (goclaw-ops-mcp) to monitor litellm namespace
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: goclaw-ops-reader
+  namespace: litellm
+  labels:
+    managed-by: scotty-ops
+rules:
+  # Pods — check status, restarts, age
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Deployments / StatefulSets / DaemonSets — describe, check replicas
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Services & Endpoints — connectivity check
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list"]
+  # ConfigMaps — read config (no secrets)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # Events — see crash/error events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Metrics (top pods)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: goclaw-ops-reader-binding
+  namespace: litellm
+  labels:
+    managed-by: scotty-ops
+subjects:
+  - kind: ServiceAccount
+    name: goclaw-ops
+    namespace: sdlc-go-prod
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: goclaw-ops-reader

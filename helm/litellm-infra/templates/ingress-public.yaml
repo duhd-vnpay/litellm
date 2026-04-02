@@ -1,0 +1,34 @@
+{{- if .Values.publicIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm-public
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    # WAF/CDN IP allowlist — chỉ chấp nhận traffic từ VNPayCloud WAF
+    nginx.ingress.kubernetes.io/whitelist-source-range: "{{ join "," .Values.publicIngress.allowedIPs }}"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # WAF terminates TLS, forwards HTTP to LB — disable NGINX redirect
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Preserve real client IP từ WAF X-Forwarded-For
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: tls-vnshop-cloud
+      hosts:
+        - {{ .Values.publicIngress.host }}
+  rules:
+    - host: {{ .Values.publicIngress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: 4000
+{{- end }}
