@@ -11,13 +11,19 @@ replicaCount: 2
 image:
   # SECURITY: Pin to exact digest, NOT mutable tags like main-stable/main-latest
   # Supply chain incident 2026-03-24: v1.82.7/v1.82.8 compromised by TeamPCP (credential stealer)
-  # Current image runs v1.82.3 (verified clean). Update ONLY after manual review.
-  # Digest: sha256:7c51011535fc9347fc306c8ed7d2e4cdda2336ffd91d930a35fdccd034f2ec17
   # Ref: https://docs.litellm.ai/blog/security-update-march-2026
-  repository: ghcr.io/berriai/litellm-database
+  #
+  # 2026-04-10: Upgrade v1.82.3 → v1.83.3.rc.1 to fix 3 CVEs:
+  #   - GHSA-jjhc-v7c2-5hh6 (CRITICAL 9.8) OIDC cache key collision → auth bypass
+  #   - GHSA-69x8-hrgq-fjj8 (HIGH 8.8) SHA-256 password hash exposure + pass-the-hash
+  #   - GHSA-53mr-6c8q-9789 (HIGH 8.4) Privilege escalation via /config/update
+  # Ref: https://docs.litellm.ai/blog/security-hardening-april-2026
+  #
+  # 2026-04-14: Upgrade v1.83.3.rc.1 → v1.83.3-stable (stable release of same version)
+  # Digest (amd64): sha256:f055956dead344aa630356cac22545bf6d22d8a3e0de445efe5b3bea998a9c73
+  repository: litellm/litellm-database
   pullPolicy: IfNotPresent
-  tag: "main-stable"
-  # To upgrade: verify new version is clean, update tag, run `helm upgrade`, then update digest comment
+  tag: "v1.83.3-stable"
 
 # ─── Database (use litellm-infra's PostgreSQL) ────────────────────────────────
 db:
@@ -46,23 +52,105 @@ environmentSecrets:
 # ─── Proxy Config ─────────────────────────────────────────────────────────────
 proxy_config:
   model_list:
-    # ── VNPAY GenAI Gateway (on-premise GLM-4) ──
+    # ── Tier 0: VNPAY GenAI on-premise — sensitive data, zero egress ──────────
+    - model_name: vnpay-sensitive
+      litellm_params:
+        model: openai/v_glm46
+        api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
+        api_key: os.environ/VNPAY_GENAI_API_KEY
+        num_retries: 2
+        model_info:
+          id: vnpay-sensitive
+          description: "On-premise GLM-4 — dữ liệu nhạy cảm, zero data egress"
+
+    # Legacy alias — giữ để backward compat với client đang dùng v_glm46
     - model_name: v_glm46
       litellm_params:
         model: openai/v_glm46
         api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
+        num_retries: 2
         model_info:
           id: v_glm46
 
-    # Additional providers can be added via UI (store_model_in_db: true)
+    # ── Tier 1: Kimi K2.5 — simple tasks (format, dịch, tóm tắt) ───────────────
+    - model_name: vnpay-simple
+      litellm_params:
+        model: anthropic/kimi-k2.5
+        api_base: https://api.moonshot.ai/anthropic
+        api_key: os.environ/KIMI_API_KEY
+        num_retries: 2
+        model_info:
+          id: vnpay-simple
+          input_cost_per_token: 0.0000006    # $0.60/MTok
+          output_cost_per_token: 0.0000025   # $2.50/MTok
+          description: "Kimi K2.5 — tác vụ đơn giản, 128K context"
+
+    # ── Tier 2: Kimi K2.5 — coding, analysis ─────────────────────────────────
+    # Endpoint: Anthropic-compatible API tại api.moonshot.ai/anthropic
+    - model_name: vnpay-medium
+      litellm_params:
+        model: anthropic/kimi-k2.5
+        api_base: https://api.moonshot.ai/anthropic
+        api_key: os.environ/KIMI_API_KEY
+        num_retries: 2
+        model_info:
+          id: vnpay-medium
+          input_cost_per_token: 0.0000006    # $0.60/MTok
+          output_cost_per_token: 0.0000025   # $2.50/MTok
+          description: "Kimi K2.5 — coding, debug, analysis"
+
+    # ── Tier 3: Claude Sonnet 4.6 — complex reasoning ─────────────────────────
+    - model_name: claude-sonnet
+      litellm_params:
+        model: anthropic/claude-sonnet-4-6
+        api_key: os.environ/ANTHROPIC_API_KEY
+        num_retries: 2
+        model_info:
+          id: claude-sonnet
+          description: "Claude Sonnet 4.6 — kiến trúc, bảo mật, reasoning phức tạp"
+
+    # ── Tier 3+: Claude Opus 4.6 — deep reasoning, long context ──────────────
+    - model_name: claude-opus
+      litellm_params:
+        model: anthropic/claude-opus-4-6
+        api_key: os.environ/ANTHROPIC_API_KEY
+        num_retries: 2
+        model_info:
+          id: claude-opus
+          description: "Claude Opus 4.6 — phân tích chiến lược, tác vụ phức tạp nhất"
+
+    # Additional providers added via UI (store_model_in_db: true).
+    # NOTE: num_retries for DB-stored models is applied by post-upgrade Job
+    # See: helm/litellm-post-upgrade-job.yaml
 
   general_settings:
     master_key: os.environ/PROXY_MASTER_KEY
     store_model_in_db: true
     enable_content_filtering: false
 
+  router_settings:
+    num_retries: 2  # Router-level global — correct scope for v1.83.3.rc.1 bug fix
+    # Fallback chain: nếu provider fail → thử provider tiếp theo
+    fallbacks:
+      - claude-opus:
+          - claude-sonnet
+      - claude-sonnet:
+          - vnpay-medium
+      - vnpay-medium:
+          - vnpay-simple      # Kimi medium fail → Kimi simple
+    # Context window overflow → escalate lên tier cao hơn
+    context_window_fallbacks:
+      - vnpay-simple:
+          - claude-sonnet      # Kimi 128K overflow → Claude Sonnet
+      - vnpay-medium:
+          - claude-sonnet      # Kimi 128K overflow → Claude Sonnet
+    allowed_fails: 2       # cho phép fail 2 lần trước khi cooldown
+    cooldown_time: 60      # giây cooldown khi provider bị đánh dấu fail
+
   litellm_settings:
+    num_retries: 2  # Library-level fallback (may not reach router in v1.83.3.rc.1)
+    modify_params: true  # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
     request_timeout: 300
     cache: true
     cache_params:
@@ -70,6 +158,10 @@ proxy_config:
       host: litellm-redis
       port: 6379
       password: os.environ/REDIS_PASSWORD
+    # ── Pre-call routing hook ─────────────────────────────────────────────────
+    # Mount: /etc/litellm/hooks/vnpay_routing_hook.py (xem volumes bên dưới)
+    callbacks:
+      - /etc/litellm/hooks/vnpay_routing_hook.vnpay_routing_hook
 
 # ─── Resources ────────────────────────────────────────────────────────────────
 resources:
@@ -88,6 +180,9 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+    nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"
+    nginx.ingress.kubernetes.io/forwarded-for-header: "X-Forwarded-For"
   hosts:
     - host: litellm.x.vnshop.cloud
       paths:
@@ -131,3 +226,43 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         app: litellm
+
+# ─── Routing Hook — mount Python pre-call hook vào container ──────────────────
+# ConfigMap: helm/litellm-routing-hook.yaml
+# Apply trước helm upgrade: kubectl apply -f helm/litellm-routing-hook.yaml -n litellm
+volumes:
+  - name: routing-hook
+    configMap:
+      name: litellm-routing-hook
+
+volumeMounts:
+  - name: routing-hook
+    mountPath: /etc/litellm/hooks
+    readOnly: true
+
+# ─── Probe tuning — LiteLLM startup ~60-90s (load DB models + init callbacks) ───
+livenessProbe:
+  initialDelaySeconds: 60   # cho đủ thời gian startup trước khi bắt đầu check
+  periodSeconds: 30         # giảm từ 10s → probe ít aggressive hơn
+  timeoutSeconds: 10        # tăng từ 1s → tránh false-positive timeout
+  failureThreshold: 3
+
+readinessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30      # 30 × 10s = 5 phút max startup window
+
+# ─── Extra env vars ───────────────────────────────────────────────────────────
+# Format: list [{name, value}] — upstream chart dùng toYaml trực tiếp vào container env
+extraEnvVars:
+  - name: LITELLM_LOG
+    value: "INFO"                # DEBUG → INFO: giảm CPU/IO đáng kể khi production
+  - name: PYTHONPATH
+    value: "/etc/litellm/hooks"
