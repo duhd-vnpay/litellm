@@ -1,438 +1,564 @@
-# LiteLLM Gateway - Unified AI Platform cho VNPAY
+# LLM Gateway API — Nền tảng quản trị LLM tập trung cho VNPAY
 
-> **Tài liệu nội bộ** | Ngày: 02/04/2026 | Người trình bày: DuHD - AI Platform Team
-> **Đối tượng**: CTO, Tech Leaders, Engineering Managers
+> **Tài liệu nội bộ** | Ngày: 10/04/2026 | Trình bày: DuHD — AI Platform Team
+> **Đối tượng**: Ban Tổng Giám đốc, Chủ tịch HĐQT, Ban Điều hành CN
 
 ---
 
-## 1. Vấn đề hiện tại
+## 1. Tóm tắt điều hành
 
-Các đội phát triển tại VNPAY đang sử dụng AI/LLM một cách phân tán:
+VNPAY đang dự chi **~8.18 tỷ VND/năm** cho 149 subscription AI cá nhân (Claude Max, ChatGPT, Gemini, Adobe CC, Figma, và 20+ công cụ khác) trải rộng trên toàn bộ đơn vị. Chi phí này **phân tán, không kiểm soát được**, không có audit trail, và tiềm ẩn rủi ro rò rỉ dữ liệu doanh nghiệp.
 
-- Mỗi developer tự quản lý API key riêng (Anthropic, OpenAI, Google...)
-- Không kiểm soát được chi phí sử dụng AI trên toàn công ty
-- Không có audit trail - ai dùng gì, bao nhiêu, cho mục đích gì
-- Rủi ro bảo mật: API keys nằm rải rác trên máy cá nhân, Slack, .env files
-- Không thể enforce policy: giới hạn model nào được dùng, budget bao nhiêu/tháng
+**Giải pháp**: Triển khai **LLM Gateway API** — một cổng truy cập AI tập trung, chạy trên hạ tầng VNPayCloud nội bộ, kết nối tất cả nhà cung cấp AI (Anthropic, Kimi, MiniMax, VNPAY GenAI, và mở rộng thêm OpenAI, Google, DeepSeek...) qua một đầu mối duy nhất.
 
-## 2. Giải pháp: LiteLLM Gateway
+**Kết quả kỳ vọng**:
+- Giảm **52-60% tổng chi phí AI** (~4.3–4.9 tỷ/năm) nhờ chuyển sang mô hình pay-per-use + intelligent routing; riêng phần LLM text (Anthropic/OpenAI/Google ~6.35 tỷ) tiết kiệm **68-77%**
+- **Kiểm soát hoàn toàn** ai dùng gì, bao nhiêu, cho mục đích gì
+- **Bảo vệ dữ liệu** — lọc thông tin nhạy cảm trước khi gửi ra ngoài
+- **Nền tảng AI cho 20+ hệ thống nội bộ** (SOCCHAT, BAS, và các ứng dụng nghiệp vụ)
 
-LiteLLM là **Unified LLM Gateway** - một proxy trung tâm kết nối tất cả AI providers qua một endpoint duy nhất, chạy trên hạ tầng K8s nội bộ VNPayCloud.
+**Trạng thái**: Đã triển khai và vận hành production — 6 teams, 39 nhân sự, 4 AI providers kết nối.
 
-```
-          Consumers (gửi request)
-          ========================
-     Claude Code      Antigravity      Hệ thống nội bộ
-     CLI / VSCode /   (AI Agent)       (Chatbot, QA,
-     Xcode                              Automation...)
-          |               |               |
-          +---------------+---------------+
-                          |
-                          v
-               +--------------------+
-               |  LiteLLM Gateway   |
-               |  Guardrails        |
-               |  Key Management    |
-               |  Cost Tracking     |
-               +--------------------+
-                          |
-          +-------+-------+-------+-------+-------+
-          |       |       |       |       |       |
-          v       v       v       v       v       v
-      VNPAY    Anthropic OpenAI  Gemini DeepSeek Ollama
-      GenAI    Claude    GPT-4o  Gemini  DeepSeek (On-premise)
-      GLM-4    Opus/     o3-pro  2.5     R1       Qwen, Llama
-      (v_glm46)Sonnet    Codex   Flash             CodeGemma...
-          ========================
-          Providers (LLM backends)
-```
+---
 
-## 3. Kiến trúc triển khai tại VNPayCloud
+## 2. Vấn đề hiện tại
+
+### Chi phí phân tán, không kiểm soát
+
+| Hiện trạng | Rủi ro |
+|------------|--------|
+| Mỗi nhân sự tự mua subscription AI riêng | Chi phí ~8.18 tỷ/năm (148 dòng, 571 TK, 40+ đơn vị), không tối ưu — nhiều TK dùng không hết quota |
+| Không có báo cáo sử dụng tập trung | Không biết AI đang tạo giá trị bao nhiêu, ở đâu, cho ai |
+| API keys nằm rải rác trên máy cá nhân | Rủi ro rò rỉ credentials, không revoke được khi nhân sự nghỉ việc |
+| Mỗi hệ thống tự kết nối riêng tới provider | Không có guardrails chung, không kiểm soát dữ liệu gửi ra ngoài |
+
+### Rủi ro dữ liệu
+
+- Nhân sự có thể vô tình gửi **dữ liệu giao dịch, thông tin khách hàng, source code nhạy cảm** tới AI provider bên ngoài
+- Không có lớp lọc nào giữa người dùng và AI provider — hoàn toàn phụ thuộc vào ý thức cá nhân
+- Không có audit trail — nếu xảy ra sự cố rò rỉ, không truy vết được
+
+---
+
+## 3. Giải pháp: LLM Gateway API tập trung
+
+### Mô hình hoạt động
 
 ```
-                    Developer / Service
-                          |
-                          | HTTPS
-                          v
-                   VNPayCloud WAF/CDN
-               (api-llm.x.vnshop.cloud)
-                          |
-                          v
-                Floating IP: 103.67.184.237
-                          |
-                          v
-+------------------------------------------------------------------+
-|                      VNPayCloud K8s Cluster                      |
-|                      (sdlc-go-k8s-v2)                            |
-|                                                                  |
-|            LB VIP: 10.10.1.87 (SG: WAF IPs allowlist)           |
-|                          |                                       |
-|              NodePort 30080/30443                                |
-|                          |                                       |
-|              NGINX Ingress Controller                            |
-|              ├── api-llm.x.vnshop.cloud  (public, WAF whitelist) |
-|              └── litellm.x.vnshop.cloud  (admin, Teleport only)  |
-|                          |                                       |
-|  +--- Namespace: litellm -----------------------------------+    |
-|  |                                                          |    |
-|  |  +------------------+    +------------+    +---------+   |    |
-|  |  | LiteLLM Gateway  |    | PostgreSQL |    |  Redis  |   |    |
-|  |  | (2 replicas, HA) |    | 16-alpine  |    | Cache   |   |    |
-|  |  | Port: 4000       |    | Keys, Teams|    | Rate    |   |    |
-|  |  |                  |    | Usage Logs |    | Limit   |   |    |
-|  |  | - Guardrails     |    +------------+    +---------+   |    |
-|  |  | - Key Mgmt       |         5Gi PVC                    |    |
-|  |  | - Cost Tracking  |                                    |    |
-|  |  | - Model Router   |                                    |    |
-|  |  +--------+---------+                                    |    |
-|  |           |                                              |    |
-|  +-----------|----------------------------------------------+    |
-|              |                                                   |
-|  +--- Namespace: sdlc-go-prod ---+  +--- Namespace: teleport -+ |
-|  | GoClaw, Web Dashboard,       |  | Teleport Agent          | |
-|  | Serena, GitNexus ...          |  | (SSO + MFA, admin UI)   | |
-|  +-------------------------------+  +-------------------------+ |
-|                                                                  |
-+------------------------------------------------------------------+
-       |                    |                         |
-       v                    v                         v
-   VNPAY GenAI         Anthropic API            Ollama Server
-   genai.vnpay.vn      (Cloud)                  (On-premise)
-   (GLM-4, on-premise)                          (Future)
+        Người dùng & Hệ thống VNPAY
+        ============================
+   ~571 TK / ~800 người  SOCCHAT     BAS           20+ Hệ thống
+   (Claude Code,        (Chatbot    (Tạo URD,     nghiệp vụ
+    VS Code, Xcode)      nội bộ)    tài liệu)     (TAS, ...)  
+        |               |              |               |
+        +-------+-------+------+-------+-------+-------+
+                |              |               |
+                v              v               v
+        +--------------------------------------------------+
+        |              LLM Gateway API (LiteLLM)                |
+        |                                                  |
+        |  Quản lý truy cập    Guardrails bảo mật         |
+        |  Theo dõi chi phí    Lọc dữ liệu nhạy cảm      |
+        |  Giới hạn ngân sách  Chặn prompt injection       |
+        |  Báo cáo sử dụng    Định tuyến thông minh       |
+        |                                                  |
+        |        Chạy trên VNPayCloud nội bộ               |
+        +--------------------------------------------------+
+                |              |               |
+                v              v               v
+          VNPAY GenAI     Anthropic        Kimi / MiniMax
+          (On-premise)    (Claude)         + mở rộng thêm
+          Dữ liệu nhạy   Task phức tạp    OpenAI, Google,
+          cảm, zero egress                  DeepSeek...
 ```
 
-| Thành phần | Chi tiết |
-|------------|----------|
-| **Hạ tầng** | K8s cluster `sdlc-go-k8s-v2` trên VNPayCloud (3 worker nodes, 4vCPU/8GB each) |
-| **Namespace** | `litellm` - tách biệt hoàn toàn khỏi workload khác |
-| **HA** | 2 replicas LiteLLM + PodDisruptionBudget, zero-downtime rolling upgrade |
-| **Database** | PostgreSQL 16 riêng (lưu virtual keys, teams, usage logs, model config) |
-| **Cache** | Redis (response cache, rate limiting, session state) |
-| **Public API** | `api-llm.x.vnshop.cloud` → WAF/CDN → Floating IP `103.67.184.237` → LB → Ingress |
-| **Admin UI** | `litellm.x.vnshop.cloud` → Teleport SSO + MFA (admin only) |
-| **WAF** | VNPayCloud WAF/CDN (14 WAF IPs whitelist tại NGINX Ingress) |
-| **TLS** | Wildcard cert `*.x.vnshop.cloud` (WAF terminate TLS, internal HTTP) |
-| **Bảo mật** | WAF IP whitelist, LiteLLM API key auth, SealedSecrets cho provider credentials |
-| **Monitoring** | Jaeger (request tracing), Grafana (cost dashboard), Prometheus metrics |
-| **Models hiện tại** | `v_glm46` (VNPAY GenAI GLM-4 on-premise) — tested & verified |
+### Nguyên tắc cốt lõi
 
-**Truy cập hiện tại**: Public endpoint `https://api-llm.x.vnshop.cloud` qua WAF/CDN. Developer chỉ cần API key, không cần VPN hay Teleport. Admin dashboard qua Teleport SSO tại `litellm.x.vnshop.cloud`.
+- **Một cổng duy nhất**: Mọi truy cập AI đi qua gateway — không ai kết nối trực tiếp tới provider
+- **Pay-per-use**: Chỉ trả tiền cho lượng sử dụng thực tế, không mua subscription cố định
+- **Dữ liệu nhạy cảm không rời VNPAY**: Tự động route qua VNPAY GenAI on-premise
+- **Kiểm soát tập trung**: Quản lý key, ngân sách, quyền truy cập model từ một dashboard
 
-## 4. Lợi ích Enterprise
+---
 
-### Chi phí & Kiểm soát
-- **Cost tracking real-time**: Dashboard hiển thị chi phí theo team, dự án, cá nhân
-- **Budget limits**: Set ngân sách tối đa/tháng cho mỗi team (alert khi đạt 80%)
-- **Rate limiting**: Giới hạn request/phút để tránh chi phí đột biến
-- **Một hóa đơn**: Thay vì mỗi dev tự mua credits riêng
+## 4. Ứng dụng kết nối qua LLM Gateway API
 
-### Bảo mật & Compliance
-- **WAF/CDN**: Traffic qua VNPayCloud WAF trước khi tới gateway, chống DDoS và injection
-- **API Key Auth**: Mọi request cần virtual key hợp lệ, key có rate limit và budget
-- **Audit log**: Ghi nhận mọi request - ai, lúc nào, model nào, bao nhiêu tokens
-- **Key rotation**: Thay đổi API key provider mà không ảnh hưởng người dùng (virtual key tách biệt khỏi provider key)
-- **Data sovereignty**: Gateway chạy trên VNPayCloud, dữ liệu nhạy cảm route qua VNPAY GenAI on-premise (zero data egress)
-- **Guardrails**: PII auto-redaction, prompt injection blocking, data leak prevention - filter tại gateway trước khi data rời infra
-- **Admin UI bảo mật**: Dashboard quản trị chỉ truy cập qua Teleport SSO + MFA
+### 4.1 Công cụ phát triển phần mềm (~571 TK đăng ký, ~800 người dùng thực tế)
 
-### On-premise Models: VNPAY GenAI & Ollama
+| Công cụ | Mô tả | Lợi ích |
+|---------|--------|---------|
+| **Claude Code** (Terminal, VS Code, Xcode) | AI coding assistant đọc/sửa code, chạy tests, tạo PR, debug | Tiết kiệm 3-5 giờ/dev/tuần cho coding tasks |
+| **AI Code Review** | Tự động review merge request, phát hiện bugs, đề xuất cải tiến | Tăng chất lượng code, giảm thời gian review |
 
-LiteLLM hỗ trợ kết nối các LLM chạy trực tiếp trên hạ tầng nội bộ VNPAY, **dữ liệu không bao giờ rời khỏi datacenter**:
+### 4.2 Hệ thống nghiệp vụ nội bộ (20+ hệ thống)
 
-```
-  LiteLLM Gateway
-       |
-       +---> VNPAY GenAI: genai.vnpay.vn (GLM-4, đã triển khai)
-       |
-       +---> Cloud: Anthropic, OpenAI, Gemini (khi cần model mạnh)
-       |
-       +---> Ollama Server (future, mạng nội bộ VNPAY)
-              GPU Server / VNPayCloud VM
-              ├── qwen2.5-coder:32b    (coding, 32B params)
-              ├── llama3.3:70b         (general, 70B params)
-              ├── codegemma:7b         (code review, nhẹ)
-              └── deepseek-r1:14b      (reasoning)
-```
+| Hệ thống | Chức năng | LLM Gateway API hỗ trợ |
+|-----------|-----------|-------------------|
+| **SOCCHAT** | Chatbot nội bộ phục vụ nhân viên VNPAY | Kết nối nhiều model, tự động lọc PII, kiểm soát chi phí per-session |
+| **BAS** (Business Analysis AI) | Tạo tài liệu nghiệp vụ (URD, SRS) trong luồng SDLC | Route tới model phù hợp từng loại tài liệu, audit trail nội dung |
+| **Các hệ thống khác** | QA Automation, Log Analysis, v.v. | Chuẩn API thống nhất — kết nối 1 lần, dùng được mọi model |
 
-**Cấu hình** - thêm model qua `config.yaml` hoặc Dashboard UI:
+### 4.3 Lợi thế của mô hình gateway cho hệ thống nội bộ
 
-```yaml
-model_list:
-  # VNPAY GenAI Gateway (on-premise, đã triển khai)
-  - model_name: v_glm46
-    litellm_params:
-      model: openai/v_glm46
-      api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
-      api_key: os.environ/VNPAY_GENAI_API_KEY
+- **Kết nối 1 lần**: Hệ thống chỉ cần tích hợp 1 API endpoint, không phải viết code riêng cho từng provider
+- **Đổi model không đổi code**: Chuyển từ GPT-4o sang Claude hay VNPAY GenAI — chỉ thay đổi config tại gateway
+- **Failover tự động**: Model A gặp sự cố → gateway tự chuyển sang Model B, hệ thống không bị gián đoạn
+- **Guardrails chung**: Mọi hệ thống đều được bảo vệ bởi cùng một lớp lọc dữ liệu
 
-  # Ollama models (on-premise, future)
-  - model_name: qwen-coder-local
-    litellm_params:
-      model: ollama/qwen2.5-coder:32b
-      api_base: http://ollama-server.vnpay.internal:11434
-```
+---
 
-**So sánh Cloud vs On-premise:**
+## 5. Bảo mật & Kiểm soát dữ liệu
 
-| | Cloud Models | On-premise (VNPAY GenAI / Ollama) |
-|---|---|---|
-| **Chi phí** | Pay-per-token | Hạ tầng sẵn có - chạy unlimited |
-| **Dữ liệu** | Gửi ra internet (có Guardrails filter) | 100% nội bộ - zero data egress |
-| **Latency** | ~500ms-2s (phụ thuộc provider) | ~100-500ms (mạng nội bộ) |
-| **Compliance** | Phụ thuộc DPA với provider | Hoàn toàn kiểm soát |
-| **Use case** | Task phức tạp cần model mạnh | Code review, dịch thuật, phân tích log, dữ liệu nhạy cảm |
+### 5.1 Guardrails — Lớp bảo vệ dữ liệu doanh nghiệp
 
-**Hybrid routing** - LiteLLM tự động route theo policy:
-- Dữ liệu nhạy cảm (tài chính, PII) -> route tới **VNPAY GenAI on-premise**
-- Task cần model mạnh (kiến trúc, debug phức tạp) -> route tới **Claude/GPT-4o cloud**
-- Task đơn giản (format code, tóm tắt) -> route tới **on-premise** (tiết kiệm chi phí)
+Mọi request gửi tới AI đều đi qua lớp lọc bảo mật **tại gateway trên VNPayCloud**, trước khi dữ liệu rời khỏi hạ tầng VNPAY:
 
-### AI Security Guardrails
+| Lớp bảo vệ | Chức năng | Ví dụ thực tế |
+|-------------|-----------|---------------|
+| **Lọc thông tin cá nhân (PII)** | Tự động che CCCD, SĐT, STK, email trước khi gửi ra ngoài | `"KH Nguyễn Văn A, SĐT 0901234567"` → `"KH [REDACTED], SĐT [REDACTED]"` |
+| **Chặn prompt injection** | Phát hiện và chặn các cuộc tấn công thao túng AI | Ngăn kẻ xấu lợi dụng AI để trích xuất dữ liệu nội bộ |
+| **Ngăn rò rỉ dữ liệu** | Chặn gửi API keys, credentials, source code nhạy cảm | Tự động detect và chặn nếu prompt chứa connection strings, private keys |
+| **Lọc nội dung độc hại** | Chặn output không phù hợp quy chuẩn doanh nghiệp | Đảm bảo AI response phù hợp trong môi trường công sở |
+| **Policy riêng VNPAY** | Tùy chỉnh rules theo chính sách nội bộ | VD: dữ liệu tài chính chưa public → bắt buộc route on-premise |
 
-LiteLLM tích hợp lớp bảo vệ **Guardrails** - kiểm soát nội dung đầu vào/đầu ra trước khi gửi tới LLM provider, đảm bảo an toàn dữ liệu doanh nghiệp:
+### 5.2 Bảo vệ dữ liệu nhạy cảm — Định tuyến thông minh
 
 ```
-  Developer / App                      LLM Provider
-       |                                    ^
-       v                                    |
-  +-----------+    +----------------+    +--+--+
-  |  Request  |--->|  GUARDRAILS    |--->|  AI |
-  |           |    |                |    |Model|
-  |  Response |<---|  - PII Redact  |<---|     |
-  +-----------+    |  - Injection   |    +-----+
-                   |  - Toxic Filter|
-                   |  - Data Leak   |
-                   |  - Custom Rule |
-                   +----------------+
-                   (chạy trên infra VNPAY)
+   Request chứa dữ liệu nhạy cảm          Request thông thường
+   (giao dịch, KH, tài chính)              (code, tóm tắt, dịch thuật)
+              |                                       |
+              v                                       v
+       VNPAY GenAI (On-premise)              Cloud AI (Claude, GPT-4o)
+       Dữ liệu KHÔNG rời datacenter         Đã qua Guardrails lọc PII
+       100% kiểm soát nội bộ                 Model mạnh cho task phức tạp
 ```
 
-| Guardrail | Chức năng | Ví dụ |
-|-----------|-----------|-------|
-| **Prompt Injection Blocking** | Phát hiện và chặn prompt injection attacks trong input | Chặn khi user cố gắng bypass system prompt, jailbreak model, hoặc inject lệnh độc hại qua input |
-| **PII Auto-Redaction** | Tự động che/xóa thông tin cá nhân (CCCD, SĐT, STK, email) trước khi gửi ra ngoài | `"Khách hàng Nguyễn Văn A, SĐT 0901234567"` -> `"Khách hàng [REDACTED], SĐT [REDACTED]"` - dữ liệu nhạy cảm không bao giờ rời khỏi infra VNPAY |
-| **Toxic Response Filtering** | Lọc nội dung độc hại, không phù hợp trong response từ LLM | Chặn output chứa nội dung bạo lực, phân biệt, hoặc không phù hợp với quy chuẩn doanh nghiệp |
-| **Data Leak Prevention** | Ngăn rò rỉ dữ liệu nội bộ (API keys, credentials, schema DB, source code nhạy cảm) | Phát hiện và chặn khi prompt chứa connection strings, private keys, hoặc nội dung classified |
-| **Custom Policy Engine** | Tạo rules riêng theo chính sách VNPAY | Ví dụ: chặn mọi request liên quan đến dữ liệu tài chính chưa public, giới hạn model nào được dùng cho dữ liệu nào, enforce tiếng Việt trong output |
+### 5.3 Kiểm soát truy cập & Audit
 
-**Điểm mấu chốt**: Toàn bộ Guardrails xử lý **tại gateway trên VNPayCloud** - dữ liệu nhạy cảm được filter trước khi gửi tới Anthropic/OpenAI. Không phụ thuộc vào trust boundary của provider bên ngoài.
+- **Virtual Key**: Mỗi nhân sự/hệ thống nhận key riêng — thu hồi ngay khi nghỉ việc hoặc thay đổi quyền
+- **Audit log đầy đủ**: Ghi nhận mọi request — ai, lúc nào, model nào, bao nhiêu tokens, nội dung gì
+- **Admin Dashboard**: Quản trị tập trung qua web UI, truy cập bảo mật qua SSO + xác thực đa yếu tố
+- **Network security**: WAF/CDN bảo vệ, IP whitelist, mã hóa TLS toàn tuyến
 
-Cấu hình Guardrails qua `config.yaml` hoặc LiteLLM Dashboard, không cần thay đổi code phía client:
+### 5.4 An toàn chuỗi cung ứng phần mềm
 
-```yaml
-# Ví dụ config guardrails
-litellm_settings:
-  guardrails:
-    - prompt_injection:        # Chặn prompt injection
-        callbacks: [lakera_prompt_injection]
-        default_on: true
-    - pii_masking:             # Che thông tin cá nhân
-        callbacks: [presidio]
-        default_on: true
-    - content_moderation:      # Lọc nội dung độc hại
-        callbacks: [openai_moderation]
-        default_on: true
-    - custom_vnpay_policy:     # Policy riêng VNPAY
-        callbacks: [custom_guardrail]
-        default_on: true
+> **Bài học thực tế**: 24/03/2026, hacker đã upload phiên bản phần mềm LiteLLM độc hại lên kho công cộng, thu thập API keys và credentials. Deployment VNPAY **KHÔNG bị ảnh hưởng** nhờ quy trình kiểm soát nghiêm ngặt.
+
+Các biện pháp đang áp dụng:
+- Pin phiên bản phần mềm theo mã hash cụ thể — không dùng phiên bản "latest" tự động
+- Kiểm tra an toàn (IOC scan) trước mỗi lần nâng cấp
+- Provider API keys cách ly hoàn toàn — nếu gateway bị tấn công, key gốc không bị lộ
+- Giới hạn network — gateway chỉ gọi được tới các AI provider đã đăng ký
+
+---
+
+## 6. Phân tích chi phí
+
+### 6.1 Phương pháp luận so sánh
+
+So sánh hai mô hình chi phí dựa trên **dữ liệu thực tế** từ LLM Gateway API (LiteLLM) trong giai đoạn pilot, tập trung vào nhà cung cấp **Anthropic Claude** — provider chính trong hệ sinh thái AI VNPAY.
+
+```
+PHƯƠNG PHÁP LUẬN — 4 BƯỚC
+
+  Bước 1            Bước 2                  Bước 3                    Bước 4
+  Đo lường          Quy đổi tháng &         Kịch bản so sánh          Chiếu quy mô
+  thực tế 8 ngày    Correction Factor       (không routing vs         571 TK / ~800 người
+  ──────────        ───────────────         có routing)               ──────────────────
+  Query DB          ① ×3.75 (8 ngày         A: API thuần              Extrapolate
+  → token/user         → 30 ngày)           B: API + on-premise       × nhóm người
+  → spend/user      ② ÷ 0.30 (30%           routing                  dùng pilot
+  → active days        adoption             → So sánh với             → So sánh
+                       → full adoption)     subscription              năm/năm
+                    Tổng hệ số: ×12.5
 ```
 
-### Supply Chain Security - Bài học từ sự cố 24/03/2026
+> **Lưu ý phương pháp**: Pilot hiện tại chỉ đo được **~30% tác vụ thực tế** của người dùng đã onboard (họ vẫn đang dùng song song subscription cũ cho 70% tác vụ còn lại). Mọi con số dưới đây đều được điều chỉnh theo correction factor này để phản ánh chi phí tại full adoption.
 
-> **Context**: Ngày 24/03/2026, hacker nhóm **TeamPCP** đã upload 2 phiên bản độc hại (v1.82.7, v1.82.8) lên PyPI thông qua token bị đánh cắp từ CI/CD pipeline. Payload thu thập API keys, SSH keys, K8s tokens, cloud credentials và gửi về server của attacker. Phiên bản độc hại tồn tại ~3 giờ trước khi bị gỡ. Deployment VNPAY dùng v1.82.3 - **KHÔNG bị ảnh hưởng**.
+### 6.2 Dữ liệu gốc — Pilot VNPAY (07/04 – 14/04/2026)
 
-Các biện pháp đã áp dụng để hạn chế rủi ro:
+> **Nguồn**: LiteLLM PostgreSQL — `LiteLLM_SpendLogs` JOIN `LiteLLM_VerificationToken`
+> **Phạm vi**: 42 nhân sự đã onboard, loại trừ system keys (goclaw-*) và ops accounts
+> **Kỳ đo**: 8 ngày gần nhất có dữ liệu đầy đủ (07/04 – 14/04/2026), quy đổi sang tháng (×30/8 = ×3.75)
 
-| Biện pháp | Chi tiết |
+| Chỉ số | 8 ngày thực tế (raw) | Quy đổi 1 tháng (×3.75) |
+|--------|--------------------|-----------------------|
+| Người dùng có phát sinh chi phí | 26 / 42 người | 26 người |
+| Tổng requests Anthropic | 1,785 | ~6,694 |
+| Prompt tokens | 81,174,412 | ~304,403,295 |
+| Completion tokens | 646,726 | ~2,425,223 |
+| **Chi phí API ghi nhận** | **$77.15** | **~$289/tháng** |
+
+### 6.3 Điều chỉnh Adoption Rate — Từ 30% → 100%
+
+Nhân sự đang dùng LiteLLM cho ~30% tác vụ, 70% còn lại vẫn qua subscription cũ.
+
+```
+  Chi phí ghi nhận (8 ngày, 30% tác vụ)   $77.15
+  × Quy đổi sang tháng                    × 3.75   (= 30 ÷ 8)
+  = Chi phí 1 tháng tại 30% adoption      $289/tháng
+
+  ÷ Adoption rate hiện tại                ÷ 0.30
+  ──────────────────────────────────────────────────────────
+  Chi phí ước tính (100% tác vụ, 1 tháng) ~$964/tháng  (26 pilot users)
+  Hệ số điều chỉnh tổng:                  ×12.5  (= 3.75 ÷ 0.30)
+```
+
+### 6.4 Phân phối sử dụng — Power Law
+
+Dữ liệu raw 8 ngày (chưa điều chỉnh) cho thấy phân phối Power Law điển hình:
+
+```
+Chi phí API ghi nhận theo người dùng (8 ngày, 30% tác vụ):
+
+  quangnh2  ████████████████████████████████████  $37.06  (48%)
+  linhdv    █████████████  $13.29  (17%)
+  thanhdt   ████████████  $12.23  (16%)
+  dinhpv    ████  $4.08  (5%)
+  anhnt3    ███  $3.09  (4%)
+  ─────────────────────────────────────────────────────────────
+  Top 5 người = $69.75 (90% tổng chi phí)
+  21 người còn lại = $7.40 (10% — TB $0.35/người/8 ngày)
+```
+
+**Sau điều chỉnh ×3.3 (full adoption)**:
+
+| Nhóm | Pilot (người) | Chi phí API raw/tháng | Chi phí API full/tháng | Subscription Max 5/tháng |
+|------|--------------|----------------------|----------------------|--------------------------|
+| **Heavy** (top 5) | 5 | ~$35–$140 | ~$115–$460 | $100 |
+| **Medium** | 5 | ~$8–$15 | ~$27–$50 | $100 |
+| **Light** | 16 | ~$1–$3 | ~$3–$10 | $100 |
+| **Occasional** (on-premise) | 16 | $0 | $0 | $100 |
+
+**Nhận xét quan trọng**: Với Claude Max 5 ($100/người), API pay-per-use **luôn rẻ hơn subscription** — kể cả với heavy users ở mức full adoption. Intelligent routing tối ưu thêm bằng cách đẩy tác vụ đơn giản xuống Kimi/MiniMax, giảm chi phí cloud thêm 80-85%.
+
+### 6.5 Hiện trạng đăng ký AI tại VNPAY (2026)
+
+> **Nguồn**: "Đăng ký nhu cầu sử dụng tài khoản AI 2026 — tổng hợp" (nội bộ, **148 dòng**, 40+ đơn vị, **571 tài khoản**)
+
+| Nhóm Provider | Loại subscription chính | Số TK | Chi phí/năm (VND) | Ghi chú |
+|---------------|------------------------|-------|-------------------|---------|
+| **Anthropic Claude** | Max $200, Max $100, Pro, Team, API | **263 TK** | **~3,000,000,000** | 46% tổng TK, ~45% ngân sách |
+| **Google / Gemini** | Gemini Pro/Ultra/API, Google AI Ultra, NotebookLM | **145 TK** | **~2,440,000,000** | bao gồm cả API dùng chung ($2K/tháng) |
+| **OpenAI / ChatGPT** | ChatGPT Plus/Business, OpenAI API | **76 TK** | **~1,050,000,000** | bao gồm OpenAI API ($2K/tháng) |
+| **Creative & Productivity** | Adobe CC, Freepik, Figma, Canva, ElevenLabs, Capcut... | **80 TK** | **~970,000,000** | không route qua Gateway |
+| **Coding & Dev tools** | GitHub Copilot Pro+, Codex Business, Replit, Manus... | **7 TK** | **~200,000,000** | một phần replace bằng Claude Code |
+| **TỔNG** | **148 dòng đăng ký, 571 TK** | **571** | **~8,180,000,000** | nguồn: file tổng hợp nội bộ 2026 ¹ |
+
+> ¹ **Ghi chú**: 7 dòng #VALUE (pay-per-usage API) không tính được chi phí cố định — tổng từ 141 dòng có số là ~6.66 tỷ, phần còn lại (~1.52 tỷ) ước tính từ các dòng API và Google Workspace. Tỷ giá: 1 USD = 26,335.5 VND.
+
+**Chi tiết Claude — phân bổ theo loại tài khoản (từ file đăng ký 2026):**
+
+| Loại | Số TK | Chi phí/năm (VND) | Đặc điểm |
+|------|-------|-------------------|----|
+| Claude Max $200 | 22 TK | ~1,369,000,000 | Heavy users — thường 5-10 người dùng chung 1 TK |
+| Claude Max $100 | 16 TK | ~448,000,000 | Power users cá nhân + nhóm nhỏ |
+| Claude Pro $20 | 191 TK | ~689,000,000 | Người dùng phổ thông, cá nhân |
+| Claude Team (Premium/Standard) | 31 TK | ~471,000,000 | Team management + agentic workflows |
+| Claude API | 3 TK | ~16,000,000+ | Tích hợp hệ thống (BAS, TCV...) — phần usage chưa tính |
+| **Tổng Anthropic** | **263 TK** | **~2,993,000,000** | **~$113,600 USD/năm** |
+
+> **Nhận xét**: Claude Max $200 (22 TK) chiếm **~46% chi phí Anthropic** — đây là heavy users dùng chung, thường 5-10 người/TK. Nhóm này tiết kiệm nhiều nhất khi chuyển sang API pay-per-use qua Gateway.
+
+### 6.6 Bảng giá Anthropic — Subscription vs API
+
+#### Anthropic Claude — Subscription
+
+> **Nguồn**: [anthropic.com/news/max-plan](https://www.anthropic.com/news/max-plan)
+
+| Gói | Giá/người/tháng | Usage limit (chính thức) | Ước tính messages/5h ¹ |
+|-----|-----------------|--------------------------|------------------------|
+| Claude Pro | $20 | Baseline | ~40–45 messages |
+| Claude for Teams | $25 | Tương đương Pro + admin | ~40–45 messages |
+| **Claude Max** (5×) | **$100** | **5× more usage than Pro** | **~225 messages** |
+| **Claude Max** (20×) | **$200** | **20× more usage than Pro** | **~900 messages** |
+
+> ¹ Con số messages/5h là **ước tính từ independent testers**, không phải số liệu chính thức của Anthropic. Thực tế thay đổi theo độ dài prompt, file đính kèm, context history và model sử dụng (Opus tốn nhiều hơn Haiku).
+>
+> **Cơ chế hoạt động**: Usage limit áp dụng theo **rolling window 5 giờ** (reset liên tục, không phải reset ngày). Từ 28/08/2025, Anthropic bổ sung thêm **weekly quota** — giới hạn 2 tầng (5h + tuần). Anthropic không công bố con số token tuyệt đối.
+>
+> **Nguồn**: [anthropic.com/news/max-plan](https://www.anthropic.com/news/max-plan) · [support.claude.com — usage limits](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work)
+>
+> VNPAY hiện tại: tổng Anthropic **~3.35 tỷ VND/năm** (216+ TK, tất cả các gói)
+
+#### Anthropic API — Pay-per-use (qua LLM Gateway API)
+
+> **Nguồn**: [anthropic.com/api/pricing](https://www.anthropic.com/api/pricing)
+
+| Model | Input ($/M token) | Output ($/M token) | Batch API Input | Batch API Output |
+|-------|-------------------|--------------------|-----------------|----|
+| Claude Haiku 4.5 | $1.00 | $5.00 | $0.50 | $2.50 |
+| Claude Sonnet 4.6 | $3.00 | $15.00 | $1.50 | $7.50 |
+| Claude Opus 4.6 | $5.00 | $25.00 | $2.50 | $12.50 |
+
+> **Batch API** (xử lý bất đồng bộ): giảm 50% chi phí — phù hợp cho tác vụ không yêu cầu real-time (code review, phân tích tài liệu hàng loạt, report generation).
+
+#### Kimi — API (qua LLM Gateway API, routing Claude Sonnet thay thế)
+
+> **Nguồn**: [platform.moonshot.cn/docs/pricing/models](https://platform.moonshot.cn/docs/pricing/models)
+
+| Model | Input ($/M token) | Output ($/M token) | Điểm mạnh |
+|-------|-------------------|--------------------|-----------|
+| Kimi K2.5 | $0.60 | $2.50 | Coding, reasoning — ngang Claude Sonnet 4.6 |
+
+> Kimi K2.5 là open-source model tương đương Claude Sonnet cho nhiều tác vụ, với chi phí **thấp hơn 5× về input và 6× về output**.
+
+#### MiniMax — API (qua LLM Gateway API, routing tác vụ đơn giản)
+
+> **Nguồn**: [platform.minimax.io/docs/guides/pricing-paygo](https://platform.minimax.io/docs/guides/pricing-paygo)
+
+| Model | Input ($/M token) | Output ($/M token) | Điểm mạnh |
+|-------|-------------------|--------------------|-----------|
+| MiniMax M2.7 (standard) | $0.30 | $1.20 | Tóm tắt, phân loại, format — cost-effective |
+| MiniMax M2.7-highspeed | $0.60 | $2.40 | Latency thấp, real-time applications |
+
+> MiniMax M2.7 có chi phí input **thấp hơn 10× so với Claude Sonnet** — phù hợp cho tác vụ đơn giản không cần model mạnh.
+
+### 6.7 Chiến lược Intelligent Routing — Mô hình VNPAY
+
+LLM Gateway API tự động phân loại và route mỗi request tới provider tối ưu về **chất lượng × chi phí**:
+
+| Loại tác vụ | Ví dụ | Route | Chi phí |
+|-------------|-------|-------|---------|
+| **Nhạy cảm / nội bộ** | Dữ liệu giao dịch, KH, tài chính | VNPAY GenAI (on-premise) | $0 (zero egress) |
+| **Đơn giản** (format, dịch, tóm tắt) | Format code, dịch document, tóm tắt meeting | MiniMax M2.7 | ~$0.30/$1.20 per MTok |
+| **Trung bình** (coding, analysis) | Debug code, viết unit test, phân tích yêu cầu | Kimi K2.5 | ~$0.60/$2.50 per MTok |
+| **Phức tạp** (architecture, deep reasoning) | Thiết kế kiến trúc, audit bảo mật, phân tích chiến lược | Claude Sonnet/Opus | $3–$5/$15–$25 per MTok |
+
+```
+ROUTING DECISION FLOW
+
+  Request vào LLM Gateway API
+         |
+         v
+  ┌─────────────────────────────┐
+  │ Có chứa dữ liệu nhạy cảm? │ → YES → VNPAY GenAI (on-premise, $0)
+  └─────────────────────────────┘
+         | NO
+         v
+  ┌─────────────────────────────┐
+  │ Task complexity classifier  │
+  │ (prompt length + keywords)  │
+  └─────────────────────────────┘
+         |
+    ┌────┴────┐
+    │         │
+   LOW      HIGH
+    │         │
+    v         v
+ MiniMax   Kimi K2.5    → nếu cần model mạnh nhất → Claude Sonnet/Opus
+ ($0.30)   ($0.60)
+```
+
+**Kết quả routing tối ưu (ước tính phân bổ tác vụ)**:
+- 30% tác vụ → VNPAY GenAI on-premise: **$0**
+- 30% tác vụ → MiniMax M2.7: **~$0.30–$1.20/MTok**
+- 25% tác vụ → Kimi K2.5: **~$0.60–$2.50/MTok**
+- 15% tác vụ → Claude Sonnet/Opus: **$3–$25/MTok**
+
+### 6.8 Hai kịch bản tại full adoption
+
+```
+Kịch bản A: API thuần — KHÔNG có routing tối ưu
+(toàn bộ tác vụ dùng Claude cloud)
+
+  26 pilot users × full adoption:          ~$964/tháng
+  Subscription 26 users (Claude Max 5):  ~$2,600/tháng
+  ───────────────────────────────────────────────────────
+  Kết quả: API RẺ HƠN $1,636/tháng (63%)
+  Nhưng: chưa tối ưu — vẫn dùng 100% Claude cloud
+
+
+Kịch bản B: API + Intelligent Routing  ← Mô hình VNPAY thực tế
+(Kimi/MiniMax/on-premise cho 85% tác vụ, Claude cloud chỉ 15%)
+
+  Chi phí nếu 100% API cloud:            $964/tháng
+  → Sau routing Kimi/MiniMax/on-premise: ~$193/tháng  (×0.20)
+  Subscription 26 users (Claude Max 5):  $2,600/tháng
+  ───────────────────────────────────────────────────────
+  Tiết kiệm vs subscription:             $2,407/tháng (93%)
+```
+
+**Routing là cốt lõi của ROI** — không phải tính năng tùy chọn. Xem chi tiết routing strategy tại mục 6.6.
+
+### 6.9 Chiếu quy mô thực tế VNPAY — Kịch bản B (Routing đầy đủ: Kimi + MiniMax + On-premise)
+
+**Dữ liệu gốc** (file đăng ký nội bộ 2026): **571 tài khoản** / **148 dòng đăng ký** / **~800 người dùng thực tế**
+(Do shared accounts: ví dụ 30 TK Gemini cho ~90 người tại KCN_DVNH, 5 TK Claude Max $200 cho ~25 người tại KCN_DVTT)
+
+| Nhóm | Số lượng (thực tế) | Route | Chi phí/người/tháng | Tổng/tháng |
+|------|-------------------|-------|--------------------|-----------:|
+| Heavy (10%) | ~80 người | 15% Claude + 25% Kimi + 60% MiniMax/on-premise | ~$30 | ~$2,400 |
+| Medium (20%) | ~160 người | 10% Claude + 30% Kimi + 60% MiniMax/on-premise | ~$8 | ~$1,280 |
+| Light (40%) | ~320 người | 5% Claude + 15% Kimi + 80% MiniMax/on-premise | ~$1.5 | ~$480 |
+| Occasional (30%) | ~240 người | 100% on-premise | $0 | $0 |
+| **Tổng** | **~800 người** | | | **~$4,160/tháng** |
+
+```
+So sánh tại quy mô thực tế VNPAY (571 TK / ~800 người) — Routing đầy đủ:
+
+  Subscription hiện tại (thực tế 2026, 148 dòng, 571 TK):   8.18 tỷ VND/năm  ≈ $321,500/năm
+  Trong đó phần LLM text (Claude + ChatGPT + Gemini):           ~$249,900/năm
+  API + Routing đầy đủ (kịch bản B, ~800 người):                ~$49,920/năm
+                                                    ──────────────────────────────────
+  Tiết kiệm hàng năm (phần LLM):                              ~$199,980/năm  ≈ ~5.1 tỷ VND
+  Tiết kiệm hàng tháng:                                        ~$16,665/tháng ≈ ~425 triệu VND
+  Tỷ lệ tiết kiệm (phần LLM):                                   80%
+```
+
+> **Ghi chú**: Phần Creative tools (Adobe CC, Figma, Canva, Freepik... ~1.83 tỷ VND) không thể thay thế bằng LLM Gateway API → **tổng tiết kiệm thực tế 52-60%** trên toàn bộ 8.18 tỷ.
+
+### 6.10 Tổng chi phí toàn bộ AI (tất cả providers)
+
+Áp dụng cùng mô hình cho ChatGPT Plus ($20/tháng), Gemini Advanced ($22/tháng) và các tool AI khác (routing về OpenAI/Gemini API tương ứng):
+
+```
+  Chi phí subscription thực tế (toàn bộ AI, 2026):     8.18 tỷ VND/năm
+  Trong đó phần LLM text (Anthropic + OpenAI + Google): ~6.35 tỷ VND/năm
+  Chi phí API Gateway — kịch bản B, routing đầy đủ:   ~1.5–2.0 tỷ VND/năm
+                                                       ──────────────────────
+  Tiết kiệm kỳ vọng (phần LLM):                       ~4.3–4.9 tỷ VND/năm  (68–77%)
+  Phần Creative tools (Adobe, Figma...):               ~1.83 tỷ — giữ nguyên (không thay thế được)
+  ──────────────────────────────────────────────────────────────────────────────────────
+  Tổng chi phí AI sau Gateway:                         ~3.3–3.9 tỷ VND/năm
+  Tiết kiệm tổng thể:                                  ~4.3–4.9 tỷ VND/năm  (52–60%)
+```
+
+> **Độ tin cậy**: Ước tính dựa trên 8 ngày dữ liệu thực tế với correction factor 30% adoption, sau đó tối ưu thêm với routing Kimi/MiniMax. Sai số ±20% tùy mức độ adoption thực tế và tỷ lệ routing. Sau 30 ngày full adoption, con số sẽ được hiệu chỉnh từ data thực.
+
+### 6.11 Cơ cấu chi phí LLM Gateway API
+
+| Khoản mục | Chi phí | Ghi chú |
+|-----------|---------|---------|
+| **Hạ tầng K8s (VNPayCloud)** | Dùng chung cluster hiện tại | Không phát sinh thêm |
+| **Phần mềm LiteLLM** | Miễn phí (open-source) | 30K+ GitHub stars |
+| **VNPAY GenAI on-premise (v_glm46)** | Hạ tầng sẵn có | Unlimited, $0 marginal cost, zero data egress |
+| **MiniMax M2.7** | ~$0.30/$1.20 per MTok | Tác vụ đơn giản — low-cost tier |
+| **Kimi K2.5** | ~$0.60/$2.50 per MTok | Tác vụ coding/analysis — mid-cost tier |
+| **Anthropic Claude** | ~$3–$25 per MTok | Chỉ tác vụ phức tạp — high-value tier |
+| **WAF/CDN + IP tĩnh** | Chi phí tối thiểu | Bảo mật tầng mạng |
+| **Tổng API usage (~800 người, 571 TK)** | **~$4,160/tháng** | Kiểm soát qua budget limits per-team |
+
+**Bốn nguồn tiết kiệm có thể đo lường được**:
+1. **Loại bỏ subscription dư**: 70% nhân sự (light + occasional) trả $0–$2/tháng thay vì $20 cố định
+2. **On-premise routing**: ~30% tác vụ nhạy cảm → v_glm46 ($0) — zero data egress
+3. **Kimi/MiniMax routing**: ~55% tác vụ còn lại → chi phí thấp hơn 5-10× so với Claude
+4. **Không mua dư quota**: Chấm dứt tình trạng quota subscription reset hàng tháng không dùng hết
+
+---
+
+## 7. Tăng năng suất nhân sự
+
+### 7.1 Developer Productivity (~800 người dùng thực tế, 571 TK đăng ký)
+
+| Chỉ số | Ước tính |
+|--------|----------|
+| Thời gian tiết kiệm | 3-5 giờ/dev/tuần (coding, debug, review) |
+| Quy đổi | ~800 người x 4 giờ/tuần x 48 tuần = **~153,600 giờ/năm** |
+| Giá trị (theo chi phí nhân sự) | Tương đương **~80 FTE** năng suất bổ sung |
+
+### 7.2 Hệ thống nghiệp vụ
+
+| Hệ thống | Tác động |
 |-----------|----------|
-| **Pin image digest** | Image K8s pin theo SHA256 digest cụ thể, không dùng mutable tag (`main-latest`, `main-stable`) |
-| **Không dùng PyPI trực tiếp** | Deploy qua Docker image (ghcr.io), không `pip install` runtime - tránh bị ảnh hưởng bởi PyPI compromise |
-| **IOC scan trước upgrade** | Trước mỗi lần upgrade, kiểm tra: không có file `.pth` lạ, không có domain `models.litellm.cloud` / `checkmarx.zone` |
-| **Secrets isolation** | Provider API keys nằm trong K8s SealedSecrets, developer chỉ nhận virtual key - nếu gateway bị compromise, key gốc không bị lộ |
-| **Network policy** | LiteLLM pods chỉ được gọi ra Anthropic/OpenAI API endpoints, không gọi được domain lạ |
-| **Upgrade quy trình** | Mọi upgrade phải qua review: check release notes -> verify image -> scan IOCs -> deploy staging -> deploy prod |
+| **SOCCHAT** | Giảm tải helpdesk nội bộ, trả lời 24/7 |
+| **BAS** | Rút ngắn thời gian tạo tài liệu URD từ ngày xuống giờ |
+| **AI Code Review** | Tự động review 100% merge request, phát hiện sớm lỗi |
 
-### Linh hoạt & Tối ưu
-- **Multi-provider**: Chuyển đổi giữa VNPAY GenAI/Anthropic/OpenAI/Gemini không cần đổi code
-- **Fallback tự động**: Model A lỗi -> tự động chuyển sang Model B
-- **Load balancing**: Phân tải request qua nhiều API keys cùng provider
-- **Model routing**: Dùng model on-premise cho task thường, model cloud cho task phức tạp
+### 7.3 Báo cáo AI Usage Analytics — Tự động hàng tuần
 
-## 5. Hướng dẫn sử dụng
+LLM Gateway API tích hợp **agent phân tích tự động**, mỗi tuần gửi báo cáo chi tiết tới ban quản lý:
 
-### 5.1 Claude Code CLI (Terminal)
+**Nội dung báo cáo**:
 
-Claude Code CLI là coding assistant chạy trực tiếp trong terminal - đọc/sửa code, chạy tests, tạo PR, debug, refactor codebase lớn. Hỗ trợ context 1 triệu tokens.
+| Mục | Chi tiết |
+|-----|---------|
+| **Executive Summary** | Tổng request, tokens, chi phí, số người dùng active, top model |
+| **Chi phí theo team & cá nhân** | Breakdown chi tiết: ai dùng bao nhiêu, model nào, tốn bao nhiêu |
+| **Chấm điểm hiệu quả sử dụng** | Mỗi nhân sự được đánh giá 4 chiều (1-10): Chất lượng prompt, Độ phức tạp task, Hiệu quả token, Mức độ adoption |
+| **Mẫu prompt thực tế** | Trích dẫn 3-5 prompt mỗi người, đánh giá điểm mạnh và cần cải thiện |
+| **Phân bổ theo thời gian & model** | Giờ nào dùng nhiều nhất, model nào phổ biến, error rate |
+| **Xu hướng tuần-qua-tuần** | So sánh tăng/giảm request, tokens, chi phí, adoption |
+| **Đề xuất cho quản lý** | Gợi ý tối ưu chi phí, cơ hội đào tạo, nhân sự cần hỗ trợ |
 
-**Cấu hình (chỉ cần làm 1 lần):**
-
-```bash
-# Set environment variables (thêm vào ~/.bashrc hoặc ~/.zshrc)
-export ANTHROPIC_BASE_URL="https://api-llm.x.vnshop.cloud"
-export ANTHROPIC_AUTH_TOKEN="<virtual-key-được-cấp>"
-```
-
-**Sử dụng:**
-
-```bash
-claude                           # Mở Claude Code
-claude --model v_glm46           # Dùng VNPAY GLM-4 on-premise
-claude --model claude-sonnet-4-6 # Dùng Claude Sonnet (khi có Anthropic credits)
-```
-
-### 5.2 Claude Code trong VS Code
-
-Claude Code tích hợp trực tiếp vào VS Code qua extension, hoạt động như AI pair-programmer ngay trong IDE.
-
-**Cài đặt:**
-
-1. VS Code → Extensions → Tìm **"Claude Code"** → Install
-2. Mở Settings (Ctrl+,) → tìm "claude" → cấu hình:
-
-```json
-// VS Code settings.json
-{
-  "claude-code.anthropicBaseUrl": "https://api-llm.x.vnshop.cloud",
-  "claude-code.anthropicAuthToken": "<virtual-key-được-cấp>"
-}
-```
-
-Hoặc cấu hình qua environment variables (tự động nhận từ terminal):
-
-```bash
-# Thêm vào ~/.bashrc hoặc ~/.zshrc (dùng chung với CLI)
-export ANTHROPIC_BASE_URL="https://api-llm.x.vnshop.cloud"
-export ANTHROPIC_AUTH_TOKEN="<virtual-key-được-cấp>"
-```
-
-**Tính năng trong VS Code:**
-- Chat panel tích hợp bên phải IDE
-- Chọn code → right-click → "Ask Claude" để hỏi về đoạn code
-- Inline code suggestions và auto-complete
-- Đọc toàn bộ workspace context (files, git history, terminal output)
-- Chạy commands, edit files, tạo PR trực tiếp từ chat
-
-### 5.3 Claude Code trong Xcode (macOS Apple Silicon)
-
-Xcode 26.3+ tích hợp Claude Code native. Kết nối qua LiteLLM Gateway với vài bước:
-
-**Yêu cầu:** macOS 26.2+, Xcode 26.3+, Mac Apple Silicon (M1/M2/M3/M4)
-
-**Bước 1: Cài Claude Code component**
-
-Xcode → Settings → Intelligence → Anthropic → Claude Agent → **Get**
-
-**Bước 2: Bypass authentication mặc định**
-
-```bash
-defaults write com.apple.dt.Xcode IDEChatClaudeAgentAPIKeyOverride ' '
-```
-
-**Bước 3: Cấu hình endpoint LiteLLM**
-
-```bash
-mkdir -p ~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig
-```
-
-Tạo file `~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/settings.json`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "<virtual-key-được-cấp>",
-    "ANTHROPIC_BASE_URL": "https://api-llm.x.vnshop.cloud"
-  }
-}
-```
-
-**Bước 4:** Restart Xcode
-
-**Troubleshooting:** Logs tại `~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/debug/`
-
-> Ref: https://gist.github.com/zoltan-magyar/be846eb36cf5ee33c882ef5f932b754b
-
-### 5.4 Antigravity & hệ thống nội bộ
-
-Antigravity và các AI agent/service kết nối LiteLLM qua OpenAI-compatible API:
-
-```
-Base URL:  https://api-llm.x.vnshop.cloud      (public qua WAF)
-API Key:   <virtual-key-được-cấp-cho-service>
-```
-
-**Từ K8s pods** (bypass WAF, gọi thẳng Floating IP):
-```
-Base URL:  http://api-llm.x.vnshop.cloud       (HTTP qua Floating IP)
-hostAlias: 103.67.184.237 api-llm.x.vnshop.cloud
-```
-
-Hỗ trợ chuẩn OpenAI API (`/v1/chat/completions`) và Anthropic API (`/v1/messages`), tương thích mọi SDK/framework hiện có.
-
-### 5.5 OpenAI SDK / Python / Node.js
-
-Sử dụng bất kỳ model nào qua cùng gateway - không cần API key riêng từng provider:
-
-```bash
-# Environment variables
-export OPENAI_BASE_URL="https://api-llm.x.vnshop.cloud/v1"
-export OPENAI_API_KEY="<virtual-key-được-cấp>"
-```
-
-```python
-# Python
-from openai import OpenAI
-client = OpenAI(base_url="https://api-llm.x.vnshop.cloud/v1", api_key="<key>")
-response = client.chat.completions.create(
-    model="v_glm46",
-    messages=[{"role": "user", "content": "Phân tích kiến trúc microservice"}]
-)
-```
-
-### 5.6 Tổng hợp endpoints
-
-| Endpoint | Mục đích | Truy cập |
-|----------|----------|----------|
-| `https://api-llm.x.vnshop.cloud` | API cho Claude Code, SDK, services | Public qua WAF, chỉ cần API key |
-| `https://litellm.x.vnshop.cloud` | Dashboard UI quản trị | Qua Teleport SSO (admin only) |
-| `http://api-llm.x.vnshop.cloud` | K8s services nội bộ | Qua Floating IP + hostAlias (bypass WAF) |
-
-## 6. Mô hình quản lý Team & Key
-
-| Team | Mục đích | Models | Budget/tháng |
-|------|----------|--------|--------------|
-| **platform** | GoClaw, CI/CD automation | v_glm46, Claude Sonnet | Theo dự án |
-| **dev-tools** | Claude Code cho developers | All models | Theo headcount |
-| **products** | Chatbot, AI features | v_glm46, Haiku | Theo sản phẩm |
-| **research** | Nghiên cứu, PoC | All models | Cố định |
-
-Mỗi developer/service nhận **virtual key** riêng. Admin quản lý qua **LiteLLM Dashboard** (web UI) tại `litellm.x.vnshop.cloud/ui` - truy cập qua Teleport SSO.
-
-## 7. Roadmap
-
-| Phase | Thời gian | Nội dung | Status |
-|-------|-----------|----------|--------|
-| **Phase 1** | Tuần 1 | Deploy LiteLLM Gateway, public endpoint qua WAF | **Done** |
-| **Phase 2** | Tuần 2 | Onboard 5-10 developers, setup teams & budgets | In progress |
-| **Phase 3** | Tuần 3-4 | Migrate GoClaw sang LiteLLM, thêm Anthropic/OpenAI credits | Planned |
-| **Phase 4** | Tháng 2 | Grafana cost dashboard, Guardrails config, backup | Planned |
-| **Phase 5** | Tháng 2-3 | Onboard toàn công ty, self-service portal | Planned |
-| **Phase 6** | Tháng 3+ | SSO integration (VNPAY AD), device pairing, Ollama on-premise | Planned |
-
-## 8. Chi phí ước tính
-
-| Khoản mục | Chi phí |
-|-----------|---------|
-| **Hạ tầng** (K8s, VNPayCloud) | Dùng chung cluster hiện tại - không phát sinh thêm |
-| **LiteLLM** | Open-source, miễn phí |
-| **VNPAY GenAI** (v_glm46) | Hạ tầng nội bộ sẵn có - không phát sinh thêm |
-| **API Usage** (Anthropic, OpenAI) | Theo usage thực tế, kiểm soát qua budget limits |
-| **WAF/CDN + Floating IP** | Chi phí minimal |
-
-**ROI**: Với 20 developers dùng Claude Code, tiết kiệm ước tính **3-5 giờ/dev/tuần** cho coding tasks. Kiểm soát chi phí AI tập trung thay vì phân tán qua nhiều tài khoản cá nhân.
+**Giá trị cho ban lãnh đạo**: Lần đầu tiên VNPAY có **data-driven visibility** về việc ~800 người (571 TK đăng ký, 148 dòng đề xuất, 40+ đơn vị) đang sử dụng AI như thế nào — không chỉ chi phí mà cả **chất lượng và hiệu quả** sử dụng.
 
 ---
 
-**Liên hệ**: DuHD (duhd@vnpay.vn) - AI Platform Team
-**Public API**: https://api-llm.x.vnshop.cloud
-**Admin Dashboard**: https://litellm.x.vnshop.cloud (qua Teleport SSO)
-**Status**: Phase 1 hoàn tất - Gateway đang chạy production, `v_glm46` tested OK
+## 8. Chiến lược AI toàn công ty
+
+### 8.1 Từ phân tán đến nền tảng
+
+```
+Trước (Q1/2026)              Hiện tại (04/2026)            Mục tiêu (05/2026)
+─────────────────────        ─────────────────────         ─────────────────────
+571 TK / ~800 người          Gateway production            Nền tảng AI toàn công ty
+dùng AI riêng lẻ, phân tán  6 teams, 39 nhân sự           tự phục vụ (self-service)
+                             4 providers kết nối
+- Không kiểm soát           - Quản lý key tập trung       - ~800 người + 20 hệ thống
+- Không đo lường            - Theo dõi chi phí            - SOCCHAT, BAS kết nối
+- Rủi ro dữ liệu           - Audit log đầy đủ            - Guardrails bảo vệ
+- ~8.18 tỷ/năm phân tán    - Báo cáo sử dụng tuần       - SSO tích hợp AD VNPAY
+```
+
+### 8.2 Lợi thế cạnh tranh
+
+- **Tốc độ triển khai AI**: Hệ thống mới kết nối AI trong vài giờ thay vì vài tuần (chuẩn API sẵn có)
+- **Data sovereignty**: Dữ liệu nhạy cảm xử lý 100% on-premise — đáp ứng yêu cầu NHNN và compliance
+- **Vendor independence**: Không phụ thuộc một provider — chuyển đổi Claude ↔ GPT ↔ GenAI không ảnh hưởng hệ thống
+- **Đo lường ROI AI**: Là một trong số ít doanh nghiệp có data chi tiết về hiệu quả sử dụng AI
+
+---
+
+## 9. Lộ trình triển khai — Hoàn thiện trong 1 tháng
+
+```
+Tuần 1 (14-18/04)     Tuần 2 (21-25/04)     Tuần 3 (28/04-02/05)   Tuần 4 (05-09/05)
+─────────────────     ─────────────────     ──────────────────     ─────────────────
+  Nền tảng &            Mở rộng &             Hệ thống              Toàn công ty &
+  Pilot                 Guardrails            nghiệp vụ             Go-Live
+  ██████████            ██████████            ██████████             ██████████
+```
+
+| Tuần | Nội dung | Kết quả đạt được | Trạng thái |
+|------|----------|-------------------|------------|
+| **Tuần 1** — Nền tảng & Pilot | Gateway production, 6 teams, 39 nhân sự onboard, 4 providers kết nối, báo cáo analytics tuần đầu | Gateway hoạt động ổn định, 44 API keys đã cấp, data chi phí thực tế | **Hoàn tất** |
+| **Tuần 2** — Mở rộng & Guardrails | Onboard thêm developer (cộng dồn ~150), bật Guardrails (PII, prompt injection), Grafana dashboard chi phí | ~150 dev active, Guardrails bảo vệ dữ liệu, dashboard chi phí real-time | **Đang triển khai** |
+| **Tuần 3** — Hệ thống nghiệp vụ | Kết nối SOCCHAT, BAS qua gateway, onboard tiếp (cộng dồn ~300), backup & monitoring | 20+ hệ thống kết nối, ~300 dev active, production hardening hoàn tất | Kế hoạch |
+| **Tuần 4** — Go-Live toàn công ty | Onboard toàn bộ ~800 người (571 TK), self-service portal, SSO tích hợp AD VNPAY, báo cáo tổng kết tháng đầu | **Toàn bộ ~800 người + 20 hệ thống** hoạt động qua LLM Gateway API | Kế hoạch |
+
+**Sau Go-Live** (liên tục cải tiến):
+- Mở rộng on-premise model (Ollama) cho dữ liệu nhạy cảm
+- Device pairing cho mobile developers
+- Tối ưu routing policy dựa trên data sử dụng thực tế
+- Báo cáo AI Usage Analytics hàng tuần cho ban lãnh đạo
+
+---
+
+## 10. Đề xuất & Phê duyệt
+
+### Đề xuất
+
+1. **Phê duyệt chuyển đổi** từ mô hình subscription cá nhân sang LLM Gateway API tập trung
+2. **Phê duyệt ngân sách API usage** (cloud providers) — thay thế chi phí subscription hiện tại
+3. **Chỉ đạo các đơn vị** (SOCCHAT, BAS, các hệ thống AI) kết nối qua LLM Gateway API
+
+### Cam kết
+
+- **Tiết kiệm 52-60%** tổng chi phí AI (~4.3–4.9 tỷ VND/năm), riêng phần LLM text tiết kiệm 68-77% (nhờ pay-per-use + routing Kimi + MiniMax + On-premise)
+- **Kiểm soát 100%** truy cập AI với audit trail đầy đủ
+- **Bảo vệ dữ liệu** nhạy cảm qua Guardrails và on-premise routing
+- **Báo cáo định kỳ** về chi phí, hiệu quả sử dụng, và ROI
+
+### Rủi ro & Giảm thiểu
+
+| Rủi ro | Xác suất | Giảm thiểu |
+|--------|----------|------------|
+| Gateway gặp sự cố | Thấp | HA 2 replicas, zero-downtime upgrade, auto-failover |
+| Supply chain attack | Thấp | Pin version theo hash, IOC scan, secrets cách ly (đã chứng minh qua sự cố 24/03) |
+| Provider tăng giá | Trung bình | Multi-provider — chuyển đổi linh hoạt, tăng tỷ trọng on-premise |
+| Nhân sự không adopt | Trung bình | Onboard từng giai đoạn, hỗ trợ setup, báo cáo adoption tuần |
+
+---
+
+**Trạng thái hiện tại**: Gateway đang vận hành production — 6 teams (DVTT-KCN, UDDD-iOS, DVNH-KCN, GSVH-KCN, eFIN-KCN, ops-litellm), 44 API keys đã cấp (39 nhân sự + 5 system), 4 providers kết nối (Anthropic, Kimi, MiniMax, VNPAY GenAI GLM-4)
