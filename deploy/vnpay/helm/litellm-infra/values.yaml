@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# LiteLLM Infrastructure — Default Values
+# ═══════════════════════════════════════════════════════════════════════════════
+
+global:
+  namespace: litellm
+
+# ─── PostgreSQL ───────────────────────────────────────────────────────────────
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  database: litellm
+  storage: 5Gi
+  storageClass: ""
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
+      cpu: "1"
+
+# ─── Redis ────────────────────────────────────────────────────────────────────
+redis:
+  enabled: true
+  image: redis:7-alpine
+  maxMemory: 128mb
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 192Mi
+      cpu: 250m
+
+# ─── Public Ingress (API qua WAF/CDN, không cần Teleport auth) ───────────────
+publicIngress:
+  enabled: true
+  host: api-llm.x.vnshop.cloud
+  # Bật IP allowlist ở tầng nginx. Mặc định tắt vì WAF VNPayCloud đã filter trước,
+  # và bật allowlist khi WAF forward XFF sẽ block public IP của client (false positive).
+  enforceAllowlist: false
+  # VNPayCloud WAF/CDN IP allowlist
+  allowedIPs:
+    # LB health check (public subnet)
+    - 10.10.1.0/24
+    # K8s pod CIDR (internal access)
+    - 10.244.0.0/16
+    # K8s private subnet (pods via LB internal)
+    - 10.10.10.0/24
+    # K8s SNAT IP (pods → Floating IP → LB loopback)
+    - 103.161.38.38
+    # WAF HCM
+    - 103.161.38.94
+    - 103.161.38.95
+    - 103.161.38.2
+    - 103.161.38.3
+    - 103.161.38.111
+    - 103.161.38.112
+    # WAF HNI
+    - 103.161.39.7
+    - 103.161.39.8
+    - 103.67.185.133
+    - 103.67.185.134
+    - 103.161.39.66
+    - 103.161.39.67
+    # WAF DC Viettel
+    - 116.111.180.101
+    - 116.111.180.102

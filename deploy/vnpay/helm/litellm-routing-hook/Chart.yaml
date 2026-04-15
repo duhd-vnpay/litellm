@@ -1,0 +1,13 @@
+apiVersion: v2
+name: litellm-routing-hook
+description: VNPay Intelligent Routing Hook — pre-call Python hook cho LiteLLM Proxy
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - litellm
+  - routing
+  - vnpay
+maintainers:
+  - name: duhd
+    email: duhd@vnpay.vn

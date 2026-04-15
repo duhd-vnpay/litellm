@@ -1,0 +1,14 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# LiteLLM VNPay Routing Hook — Values
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Namespace để deploy ConfigMap. Mặc định `litellm`.
+namespace: litellm
+
+# ConfigMap name — khớp với tên mount trong LiteLLM Deployment (volumes.name).
+configMapName: litellm-routing-hook
+
+# Labels thêm vào ConfigMap
+labels:
+  app: litellm
+  component: routing-hook
