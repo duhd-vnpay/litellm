@@ -1,0 +1,92 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# LiteLLM Post-Upgrade Job
+# ═══════════════════════════════════════════════════════════════════════════════
+# PURPOSE: Apply persistent config fixes to DB-stored models after every
+#          helm upgrade or DB rebuild.
+#
+# WHY NEEDED: Models added via LiteLLM UI are stored in LiteLLM_ProxyModelTable
+# and don't inherit settings from values-litellm-vnpay.yaml. This Job patches
+# them directly after each deploy.
+#
+# APPLY:
+#   kubectl apply -f helm/litellm-post-upgrade-job.yaml -n litellm
+#   kubectl wait --for=condition=complete job/litellm-post-upgrade -n litellm --timeout=60s
+#   kubectl delete job litellm-post-upgrade -n litellm
+#
+# OR run via script:
+#   bash helm/scripts/post-upgrade.sh
+#
+# CURRENT FIXES:
+#   1. num_retries=2 on all models
+#      Workaround for v1.83.3.rc.1 regression: num_retries=None crashes
+#      router.py:5731 when upstream returns an error.
+#      Remove when upstream fix is confirmed in stable release.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-post-upgrade
+  namespace: litellm
+  labels:
+    app: litellm
+    component: post-upgrade
+  annotations:
+    # Bump this value to force re-run when Job spec hasn't changed
+    upgrade-revision: "10"
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: litellm
+        component: post-upgrade
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: psql-patcher
+          image: postgres:16-alpine
+          env:
+            - name: DATABASE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              PGPASSWORD="$DATABASE_PASSWORD" psql \
+                -h litellm-postgresql \
+                -U "$DATABASE_USERNAME" \
+                -d litellm \
+                -v ON_ERROR_STOP=1 \
+                <<'SQL'
+
+              -- ── Fix 1: num_retries=2 on all DB-stored models ─────────────────────
+              -- Workaround: v1.83.3.rc.1 bug — num_retries=None crashes
+              -- router.py:5731 ("'>' not supported between NoneType and int")
+              -- when upstream provider returns an error and LiteLLM tries to retry.
+              UPDATE "LiteLLM_ProxyModelTable"
+              SET
+                litellm_params = jsonb_set(litellm_params, '{num_retries}', '2'::jsonb),
+                updated_at     = NOW(),
+                updated_by     = 'post-upgrade-job'
+              WHERE (litellm_params->>'num_retries')::int IS DISTINCT FROM 2;
+
+              SELECT
+                model_name,
+                litellm_params->>'num_retries' AS num_retries
+              FROM "LiteLLM_ProxyModelTable"
+              ORDER BY model_name;
+
+              SQL
+
+              echo "post-upgrade patches applied successfully"
