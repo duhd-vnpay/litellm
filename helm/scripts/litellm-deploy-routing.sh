@@ -14,10 +14,10 @@ NAMESPACE="litellm"
 RELEASE="litellm"
 CHART="${1:-oci://ghcr.io/berriai/litellm-helm}"
 VALUES_FILE="$(dirname "$0")/../values-litellm-vnpay.yaml"
-HOOK_FILE="$(dirname "$0")/../litellm-routing-hook.yaml"
+HOOK_CHART="$(dirname "$0")/../litellm-routing-hook"
 
-echo "==> [1/4] Applying routing hook ConfigMap..."
-kubectl apply -f "$HOOK_FILE" -n "$NAMESPACE"
+echo "==> [1/4] Applying routing hook chart..."
+helm upgrade --install litellm-routing-hook "$HOOK_CHART" -n "$NAMESPACE"
 
 echo "==> [2/4] Verifying hook ConfigMap..."
 kubectl get configmap litellm-routing-hook -n "$NAMESPACE" \

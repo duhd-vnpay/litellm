@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.configMapName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- toYaml .Values.labels | nindent 4 }}
+data:
+  vnpay_routing_hook.py: |
+{{ .Files.Get "hook/vnpay_routing_hook.py" | indent 4 }}

@@ -18,8 +18,14 @@ helm/
 │   ├── Chart.yaml
 │   ├── values.yaml
 │   └── templates/
+├── litellm-routing-hook/       # Helm chart: Python pre-call routing hook
+│   ├── Chart.yaml
+│   ├── values.yaml
+│   ├── hook/
+│   │   └── vnpay_routing_hook.py   # ← source code (edit here)
+│   └── templates/
+│       └── configmap.yaml
 ├── values-litellm-vnpay.yaml   # Override values cho upstream LiteLLM chart
-├── litellm-routing-hook.yaml   # ConfigMap: Python pre-call hook (intelligent tier routing)
 ├── litellm-post-upgrade-job.yaml  # Job: patch num_retries cho DB-stored models
 ├── rbac-litellm-readonly.yaml  # RBAC: read-only access cho ops team
 └── scripts/
@@ -38,8 +44,8 @@ docs/
 # 1. Infrastructure (PostgreSQL + Redis + public ingress)
 helm upgrade --install litellm-infra ./helm/litellm-infra -n litellm --create-namespace
 
-# 2. Routing hook ConfigMap
-kubectl apply -f helm/litellm-routing-hook.yaml -n litellm
+# 2. Routing hook chart (render ConfigMap từ hook/vnpay_routing_hook.py)
+helm upgrade --install litellm-routing-hook ./helm/litellm-routing-hook -n litellm
 
 # 3. LiteLLM upstream chart với override values
 helm upgrade --install litellm oci://ghcr.io/berriai/litellm-helm:1.82.3 \

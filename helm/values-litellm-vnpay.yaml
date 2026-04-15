@@ -230,8 +230,8 @@ topologySpreadConstraints:
         app: litellm
 
 # ─── Routing Hook — mount Python pre-call hook vào container ──────────────────
-# ConfigMap: helm/litellm-routing-hook.yaml
-# Apply trước helm upgrade: kubectl apply -f helm/litellm-routing-hook.yaml -n litellm
+# ConfigMap được tạo bởi helm chart: helm/litellm-routing-hook/
+# Apply trước helm upgrade: helm upgrade --install litellm-routing-hook helm/litellm-routing-hook -n litellm
 volumes:
   - name: routing-hook
     configMap:
