@@ -69,8 +69,37 @@ class MinimaxMessagesConfig(AnthropicMessagesConfig):
         if base_url.endswith("/v1/messages"):
             return base_url
 
+        # Handle OpenAI-compatible base URL (e.g. https://api.minimax.io/v1)
+        # by appending only /messages instead of /v1/messages
+        if base_url.endswith("/v1"):
+            return f"{base_url}/messages"
+
         # Otherwise append the messages endpoint
         if base_url.endswith("/"):
             return f"{base_url}v1/messages"
         else:
             return f"{base_url}/v1/messages"
+
+    def transform_anthropic_messages_request(
+        self,
+        model: str,
+        messages: list,
+        anthropic_messages_optional_request_params: dict,
+        litellm_params,
+        headers: dict,
+    ) -> dict:
+        """
+        Override to strip unsupported parameters before sending to MiniMax.
+        MiniMax Anthropic endpoint doesn't support output_config (structured output).
+        """
+        # Remove output_config if present - MiniMax doesn't support it
+        anthropic_messages_optional_request_params.pop("output_config", None)
+
+        # Call parent to handle standard transformation
+        return super().transform_anthropic_messages_request(
+            model=model,
+            messages=messages,
+            anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+            litellm_params=litellm_params,
+            headers=headers,
+        )
