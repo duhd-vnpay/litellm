@@ -6,7 +6,13 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   annotations:
     # WAF/CDN IP allowlist — chỉ chấp nhận traffic từ VNPayCloud WAF
+    # NOTE: Khi use-forwarded-headers=true + WAF forward XFF với IP public của client,
+    # nginx dùng real_ip để check whitelist → IP public của client phải nằm trong danh sách.
+    # Vì WAF đã filter tầng trước, whitelist ở đây đã được disable để tránh 403 false positive.
+    # Bật lại nếu cần defense-in-depth (và thêm IP cho phép vào allowedIPs).
+    {{- if .Values.publicIngress.enforceAllowlist }}
     nginx.ingress.kubernetes.io/whitelist-source-range: "{{ join "," .Values.publicIngress.allowedIPs }}"
+    {{- end }}
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
@@ -14,6 +20,7 @@ metadata:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
     # Preserve real client IP từ WAF X-Forwarded-For
     nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+    nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"
 spec:
   ingressClassName: nginx
   tls:

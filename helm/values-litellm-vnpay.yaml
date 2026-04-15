@@ -128,6 +128,8 @@ proxy_config:
     master_key: os.environ/PROXY_MASTER_KEY
     store_model_in_db: true
     enable_content_filtering: false
+    # Trust X-Forwarded-For header từ nginx ingress → ghi đúng client IP vào spend log
+    use_x_forwarded_for: true
 
   router_settings:
     num_retries: 2  # Router-level global — correct scope for v1.83.3.rc.1 bug fix

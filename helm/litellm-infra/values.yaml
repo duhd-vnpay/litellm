@@ -37,6 +37,9 @@ redis:
 publicIngress:
   enabled: true
   host: api-llm.x.vnshop.cloud
+  # Bật IP allowlist ở tầng nginx. Mặc định tắt vì WAF VNPayCloud đã filter trước,
+  # và bật allowlist khi WAF forward XFF sẽ block public IP của client (false positive).
+  enforceAllowlist: false
   # VNPayCloud WAF/CDN IP allowlist
   allowedIPs:
     # LB health check (public subnet)
