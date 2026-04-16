@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # Usage:
 #   helm install litellm <litellm-helm-chart-path> \
-#     -f values-vnpay.yaml -n litellm
+#     -f values-litellm-vnpay.yaml -n litellm
 
 replicaCount: 2
 # numWorkers: 2
