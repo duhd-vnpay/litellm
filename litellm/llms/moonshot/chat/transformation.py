@@ -136,11 +136,15 @@ class MoonshotChatConfig(OpenAIGPTConfig):
 
         ##########################################
         # temperature limitations
-        # 1. `temperature` on KIMI API is [0, 1] but OpenAI is [0, 2]
-        # 2. If temperature < 0.3 and n > 1, KIMI will raise an exception.
+        # 1. Reasoning models (kimi-k2.5, kimi-k2-thinking, etc.) only accept temperature=1.
+        #       Force it regardless of what the caller sends.
+        # 2. Non-reasoning: `temperature` on KIMI API is [0, 1] but OpenAI is [0, 2]
+        # 3. If temperature < 0.3 and n > 1, KIMI will raise an exception.
         #       If we enter this condition, we set the temperature to 0.3 as suggested by Moonshot AI
         ##########################################
-        if "temperature" in optional_params:
+        if supports_reasoning(model=model, custom_llm_provider="moonshot"):
+            optional_params["temperature"] = 1
+        elif "temperature" in optional_params:
             if optional_params["temperature"] > 1:
                 optional_params["temperature"] = 1
             if optional_params["temperature"] < 0.3 and optional_params.get("n", 1) > 1:
