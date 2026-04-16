@@ -1,3 +1,31 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm-health-check
+  namespace: sdlc-go-prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litellm-health-check
+rules:
+- apiGroups: [""]
+  resources: ["pods/exec", "pods", "persistentvolumeclaims"]
+  verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litellm-health-check
+subjects:
+- kind: ServiceAccount
+  name: litellm-health-check
+  namespace: sdlc-go-prod
+roleRef:
+  kind: ClusterRole
+  name: litellm-health-check
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -15,37 +43,129 @@ spec:
     spec:
       template:
         spec:
+          serviceAccountName: litellm-health-check
           restartPolicy: OnFailure
           containers:
-            - name: healthcheck
-              image: curlimages/curl:latest
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  set -e
-                  LITELLM_URL="http://litellm.litellm.svc.cluster.local:4000"
-                  log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
-                  FAILED=0
-                  log "========== LiteLLM Health Check Starting =========="
+          - name: healthcheck
+            image: bitnami/kubectl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              #!/bin/sh
+              set -e
 
+              LITELLM_URL="http://litellm.litellm.svc.cluster.local:4000"
+              LITELLM_NS="litellm"
+              LITELLM_PG_HOST="litellm-postgresql"
+              LITELLM_PG_DB="litellm"
+              LITELLM_PG_USER="litellm"
+              LOG_FILE="/tmp/litellm-health.log"
+
+              log() {
+                  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+              }
+
+              check_liveliness() {
                   log "=== Step 1: Liveliness Check ==="
-                  response=$(curl -sf --max-time 5 "$LITELLM_URL/health/liveliness" 2>/dev/null | tr -d '"' || echo "FAILED")
-                  if [ "$response" = "I'm alive!" ]; then log "PASS: Liveliness OK"
-                  else log "FAIL: Liveliness - Response: $response"; FAILED=$((FAILED+1)); fi
+                  response=$(curl -sf --max-time 5 "$LITELLM_URL/health/liveliness" 2>/dev/null || echo "FAILED")
+                  response=$(echo "$response" | tr -d '"')
+                  if [ "$response" = "I'm alive!" ]; then
+                      log "PASS: Liveliness OK"
+                      return 0
+                  else
+                      log "FAIL: Liveliness - Response: $response"
+                      return 1
+                  fi
+              }
 
+              check_readiness() {
                   log "=== Step 2: Readiness Check ==="
-                  readiness=$(curl -sf --max-time 10 "$LITELLM_URL/health/readiness" 2>/dev/null || echo '{"db":"failed"}')
-                  db_status=$(echo "$readiness" | grep -o '"db":"[^"]*"' | cut -d'"' -f4)
-                  if [ "$db_status" = "connected" ]; then log "PASS: Readiness OK (DB: $db_status)"
-                  else log "FAIL: Readiness - DB: $db_status"; FAILED=$((FAILED+1)); fi
+                  response=$(curl -sf --max-time 10 "$LITELLM_URL/health/readiness" 2>/dev/null || echo "{}")
+                  db_status=$(echo "$response" | grep -o '"db":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
+                  if [ "$db_status" = "connected" ]; then
+                      log "PASS: Readiness OK (DB: $db_status)"
+                      return 0
+                  else
+                      log "FAIL: Readiness - DB: $db_status"
+                      return 1
+                  fi
+              }
 
-                  if [ $FAILED -eq 0 ]; then log "ALL CHECKS PASSED"; exit 0
-                  else log "$FAILED CHECK(S) FAILED"; exit 1; fi
-              resources:
-                requests:
-                  cpu: "100m"
-                  memory: "128Mi"
-                limits:
-                  cpu: "500m"
-                  memory: "256Mi"
+              check_pvc() {
+                  log "=== Step 3: PVC Usage Check ==="
+                  pvc_info=$(kubectl get pvc -n "$LITELLM_NS" 2>/dev/null || echo "")
+                  if [ -z "$pvc_info" ]; then
+                      log "WARN: Cannot get PVC info"
+                      return 0
+                  fi
+
+                  log "PVC Status:"
+                  echo "$pvc_info" | tee -a "$LOG_FILE"
+
+                  high_usage=$(echo "$pvc_info" | grep -E "([8-9][0-9]%|100%)" || true)
+                  if [ -n "$high_usage" ]; then
+                      log "WARN: PVC usage > 80%: $high_usage"
+                  else
+                      log "PASS: PVC usage OK"
+                  fi
+                  return 0
+              }
+
+              check_usage() {
+                  log "=== Step 4: Usage Stats (24h) ==="
+
+                  usage=$(kubectl exec -n "$LITELLM_NS" "$LITELLM_PG_HOST-0" -- \
+                      psql -U "$LITELLM_PG_USER" -d "$LITELLM_PG_DB" -t -c "
+                      SELECT
+                        COUNT(*) as total_requests,
+                        COALESCE(SUM(total_tokens), 0) as total_tokens,
+                        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+                        COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+                        COALESCE(SUM(spend), 0) as total_spend
+                      FROM \"LiteLLM_SpendLogs\"
+                      WHERE \"startTime\" > NOW() - interval '24 hours';
+                      " 2>/dev/null || echo "0|0|0|0|0")
+
+                  TOTAL_REQ=$(echo "$usage" | awk -F'|' '{print $1}' | tr -d ' ')
+                  TOTAL_TOKENS=$(echo "$usage" | awk -F'|' '{print $2}' | tr -d ' ')
+                  PROMPT_TOKENS=$(echo "$usage" | awk -F'|' '{print $3}' | tr -d ' ')
+                  COMPLETION_TOKENS=$(echo "$usage" | awk -F'|' '{print $4}' | tr -d ' ')
+                  TOTAL_SPEND=$(echo "$usage" | awk -F'|' '{print $5}' | tr -d ' ')
+
+                  TOTAL_REQ_FMT=$(echo "$TOTAL_REQ" | sed ':a;s/\([0-9]\+\)\([0-9]\{3\}\)/\1,\2/;ta')
+                  TOTAL_TOKENS_FMT=$(echo "$TOTAL_TOKENS" | sed ':a;s/\([0-9]\+\)\([0-9]\{3\}\)/\1,\2/;ta')
+                  TOTAL_SPEND=$(echo "$TOTAL_SPEND" | tr -d ' ' | sed 's/^$/0/')
+                  TOTAL_SPEND_FMT=$(printf "%.4f" "$TOTAL_SPEND" 2>/dev/null || echo "$TOTAL_SPEND")
+
+                  log "24h Usage Stats:"
+                  log "   Requests: $TOTAL_REQ_FMT"
+                  log "   Tokens In: $PROMPT_TOKENS"
+                  log "   Tokens Out: $COMPLETION_TOKENS"
+                  log "   Total Tokens: $TOTAL_TOKENS_FMT"
+                  log "   Spend: USD $TOTAL_SPEND_FMT"
+
+                  return 0
+              }
+
+              log "========== LiteLLM Health Check Starting =========="
+              FAILED=0
+              check_liveliness || FAILED=$((FAILED+1))
+              check_readiness || FAILED=$((FAILED+1))
+              check_pvc || FAILED=$((FAILED+1))
+              check_usage || FAILED=$((FAILED+1))
+
+              if [ $FAILED -eq 0 ]; then
+                  log "ALL CHECKS PASSED"
+                  exit 0
+              else
+                  log "$FAILED CHECK(S) FAILED"
+                  exit 1
+              fi
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "128Mi"
+              limits:
+                cpu: "500m"
+                memory: "256Mi"
