@@ -2,27 +2,29 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: litellm-health-check
-  namespace: sdlc-go-prod
+  namespace: litellm
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: litellm-health-check
+  namespace: litellm
 rules:
 - apiGroups: [""]
   resources: ["pods/exec", "pods", "persistentvolumeclaims"]
   verbs: ["get", "list", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: litellm-health-check
+  namespace: litellm
 subjects:
 - kind: ServiceAccount
   name: litellm-health-check
-  namespace: sdlc-go-prod
+  namespace: litellm
 roleRef:
-  kind: ClusterRole
+  kind: Role
   name: litellm-health-check
   apiGroup: rbac.authorization.k8s.io
 ---
@@ -30,7 +32,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: litellm-health-check
-  namespace: sdlc-go-prod
+  namespace: litellm
   labels:
     app: litellm-health
     owner: scotty-ops
@@ -55,7 +57,7 @@ spec:
               #!/bin/sh
               set -e
 
-              LITELLM_URL="http://litellm.litellm.svc.cluster.local:4000"
+              LITELLM_URL="http://litellm:4000"
               LITELLM_NS="litellm"
               LITELLM_PG_HOST="litellm-postgresql"
               LITELLM_PG_DB="litellm"
