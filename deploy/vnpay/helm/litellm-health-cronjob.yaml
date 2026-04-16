@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-health-check
+  namespace: sdlc-go-prod
+  labels:
+    app: litellm-health
+    owner: scotty-ops
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: healthcheck
+              image: curlimages/curl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  LITELLM_URL="http://litellm.litellm.svc.cluster.local:4000"
+                  log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+                  FAILED=0
+                  log "========== LiteLLM Health Check Starting =========="
+
+                  log "=== Step 1: Liveliness Check ==="
+                  response=$(curl -sf --max-time 5 "$LITELLM_URL/health/liveliness" 2>/dev/null | tr -d '"' || echo "FAILED")
+                  if [ "$response" = "I'm alive!" ]; then log "PASS: Liveliness OK"
+                  else log "FAIL: Liveliness - Response: $response"; FAILED=$((FAILED+1)); fi
+
+                  log "=== Step 2: Readiness Check ==="
+                  readiness=$(curl -sf --max-time 10 "$LITELLM_URL/health/readiness" 2>/dev/null || echo '{"db":"failed"}')
+                  db_status=$(echo "$readiness" | grep -o '"db":"[^"]*"' | cut -d'"' -f4)
+                  if [ "$db_status" = "connected" ]; then log "PASS: Readiness OK (DB: $db_status)"
+                  else log "FAIL: Readiness - DB: $db_status"; FAILED=$((FAILED+1)); fi
+
+                  if [ $FAILED -eq 0 ]; then log "ALL CHECKS PASSED"; exit 0
+                  else log "$FAILED CHECK(S) FAILED"; exit 1; fi
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
