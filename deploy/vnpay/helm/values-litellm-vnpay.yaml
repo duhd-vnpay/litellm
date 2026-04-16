@@ -246,7 +246,7 @@ volumeMounts:
 livenessProbe:
   initialDelaySeconds: 60   # cho đủ thời gian startup trước khi bắt đầu check
   periodSeconds: 30         # giảm từ 10s → probe ít aggressive hơn
-  timeoutSeconds: 10        # tăng từ 1s → tránh false-positive timeout
+  timeoutSeconds: 30        # tăng từ 10s → tránh false-positive khi CPU throttle
   failureThreshold: 3
 
 readinessProbe:
