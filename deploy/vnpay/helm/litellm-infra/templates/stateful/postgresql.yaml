@@ -50,9 +50,11 @@ spec:
                   key: password
             - name: POSTGRES_DB
               value: {{ .Values.postgresql.database }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data
           volumeMounts:
             - name: pgdata
-              mountPath: /var/lib/postgresql
+              mountPath: /var/lib/postgresql/data
           resources:
             {{- toYaml .Values.postgresql.resources | nindent 12 }}
           livenessProbe:

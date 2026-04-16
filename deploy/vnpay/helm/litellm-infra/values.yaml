@@ -10,7 +10,7 @@ postgresql:
   enabled: true
   image: postgres:16-alpine
   database: litellm
-  storage: 5Gi
+  storage: 15Gi
   storageClass: ""
   resources:
     requests:
