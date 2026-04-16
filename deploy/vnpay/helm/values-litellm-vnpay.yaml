@@ -59,6 +59,7 @@ proxy_config:
         api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
+        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
         model_info:
           id: vnpay-sensitive
           description: "On-premise GLM-4 — dữ liệu nhạy cảm, zero data egress"
@@ -70,8 +71,21 @@ proxy_config:
         api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
+        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
         model_info:
           id: v_glm46
+
+    # ── MiniMax M2.7 230B on-premise — OpenAI-compatible, thinking support ──────
+    - model_name: vnpay/minimax
+      litellm_params:
+        model: openai/minimax
+        api_base: https://genai.vnpay.vn/aigateway/llm_minimax/v1
+        api_key: os.environ/VNPAY_GENAI_API_KEY
+        num_retries: 2
+        drop_params: true  # Drop unsupported params (e.g. context_management)
+        model_info:
+          id: vnpay-minimax
+          description: "MiniMax M2.7 230B on-premise — zero egress, thinking support"
 
     # ── Tier 1: Kimi K2.5 — simple tasks (format, dịch, tóm tắt) ───────────────
     - model_name: vnpay-simple
@@ -80,6 +94,7 @@ proxy_config:
         api_base: https://api.moonshot.ai/v1
         api_key: os.environ/KIMI_API_KEY
         num_retries: 2
+        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
         model_info:
           id: vnpay-simple
           input_cost_per_token: 0.0000006    # $0.60/MTok
@@ -94,6 +109,7 @@ proxy_config:
         api_base: https://api.moonshot.ai/v1
         api_key: os.environ/KIMI_API_KEY
         num_retries: 2
+        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
         model_info:
           id: vnpay-medium
           input_cost_per_token: 0.0000006    # $0.60/MTok
@@ -153,6 +169,7 @@ proxy_config:
   litellm_settings:
     num_retries: 2  # Library-level fallback (may not reach router in v1.83.3.rc.1)
     modify_params: true  # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
+    use_chat_completions_url_for_anthropic_messages: true  # Force chat/completions path — tắt Responses API routing cho openai provider (vnpay/minimax on-premise)
     request_timeout: 300
     cache: true
     cache_params:
@@ -281,3 +298,5 @@ extraEnvVars:
     value: "INFO"                # DEBUG → INFO: giảm CPU/IO đáng kể khi production
   - name: PYTHONPATH
     value: "/etc/litellm/hooks"
+  - name: LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES
+    value: "true"                # Force chat/completions path cho openai provider — fix vnpay/minimax on-premise

@@ -222,6 +222,9 @@ class MoonshotChatConfig(OpenAIGPTConfig):
         # Moonshot reasoning models: fill in reasoning_content before the API call
         if supports_reasoning(model=model, custom_llm_provider="moonshot"):
             messages = self.fill_reasoning_content(messages)
+            # Reasoning models only accept temperature=1 — force it here as a
+            # last-resort guard regardless of what map_openai_params received.
+            optional_params["temperature"] = 1
 
         # Call parent transform_request which handles _transform_messages
         return super().transform_request(

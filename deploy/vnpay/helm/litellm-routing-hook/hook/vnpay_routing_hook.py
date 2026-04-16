@@ -77,6 +77,26 @@ CLAUDE_DEFAULT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Team alias mapping: anthropic/claude* → moonshot/kimi-k2.5 ─────────────
+# Các team này không được phép dùng Anthropic Claude — mọi request
+# tới model anthropic/* hoặc claude-* đều bị redirect sang Kimi K2.5.
+TEAM_CLAUDE_TO_KIMI_ALIASES = {
+    "DVNH-KCN",     # team_id: b9216f8d-1c55-423a-abcd-f8f4d3c64532
+    "DVTT-KCN",     # team_id: 2e043e39-50c7-45b2-8aa8-4d313164fe11
+    "GSVH-KCN",     # team_id: adcee45e-9f93-4dd7-b07c-a74e37947478
+    "THHT-KCN",     # team_id: 4f1c1a0a-37ef-4dc7-9373-0fee7c87f640
+    "TTKHDL-KCN",   # team_id: 205dc6e4-ecf4-435c-b8ed-88a3a3107930
+    "UDDD-KCN",     # team_id: 9b86b2a8-a10c-4bfb-8859-a3f9d4ccb1d1
+    "eFIN-KCN",     # team_id: 5ee7ab1a-0115-46cb-aca5-e86ac8f13ec6
+}
+
+# Match anthropic/* hoặc claude-* hoặc claude/* (mọi variant)
+ANTHROPIC_MODEL_PATTERN = re.compile(
+    r"^(anthropic/|claude[-/])",
+    re.IGNORECASE,
+)
+MODEL_KIMI = "moonshot/kimi-k2.5"
+
 
 def _extract_prompt(data: dict) -> str:
     """Gộp tất cả message content thành 1 string để match pattern."""
@@ -113,6 +133,19 @@ class VNPayRoutingHook(CustomLogger):
         call_type: str,
     ) -> dict:
         current_model = data.get("model", "")
+
+        # ── Team alias: anthropic/claude* → moonshot/kimi-k2.5 ─────────────
+        # Áp dụng trước mọi logic khác — nếu team bị restrict, không cho phép
+        # gọi bất kỳ model Claude/Anthropic nào dù client chỉ định tường minh.
+        team_alias = getattr(user_api_key_dict, "team_alias", None) or ""
+        if team_alias in TEAM_CLAUDE_TO_KIMI_ALIASES:
+            if ANTHROPIC_MODEL_PATTERN.match(current_model):
+                logger.info(
+                    f"[routing] team={team_alias} → redirect {current_model} → {MODEL_KIMI} (team alias rule)"
+                )
+                data["model"] = MODEL_KIMI
+                data.setdefault("metadata", {})["routing_reason"] = f"team_alias:{team_alias}"
+                current_model = MODEL_KIMI
 
         # ── MiniMax-M2.7: strip các field không support ─────────────────────
         # MiniMax Anthropic endpoint không hỗ trợ:
