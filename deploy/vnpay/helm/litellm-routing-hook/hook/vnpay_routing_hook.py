@@ -123,6 +123,16 @@ class VNPayRoutingHook(CustomLogger):
                 data.pop("output_config", None)
                 logger.info("[routing] stripped output_config for MiniMax-M2.7")
 
+        # ── Kimi K2.5 (reasoning model): force temperature=1 ────────────────
+        # Moonshot API chỉ chấp nhận temperature=1 cho reasoning models.
+        # Client có thể gửi bất kỳ giá trị nào → override tại đây trước khi
+        # request đến LiteLLM router, tránh "invalid temperature" 400 error.
+        KIMI_MODELS = {"vnpay-simple", "vnpay-medium", "moonshot/kimi-k2.5", "kimi-k2.5"}
+        if current_model in KIMI_MODELS or "kimi-k2" in current_model.lower():
+            if data.get("temperature") != 1:
+                logger.info(f"[routing] kimi reasoning model → force temperature=1 (was: {data.get('temperature')})")
+                data["temperature"] = 1
+
         # Chỉ override khi model là Claude default (claude-sonnet-4-*, claude-opus-4-*, v.v.)
         # Mọi model khác → client đã chủ động chọn → tôn trọng, không override.
         if not CLAUDE_DEFAULT_PATTERN.match(current_model):
