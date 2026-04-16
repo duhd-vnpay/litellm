@@ -251,8 +251,8 @@ livenessProbe:
 
 readinessProbe:
   initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
+  periodSeconds: 15         # giảm tần suất check khi pod busy
+  timeoutSeconds: 15        # tăng từ 5s → 15s tránh false-positive khi CPU throttle
   failureThreshold: 3
 
 startupProbe:
