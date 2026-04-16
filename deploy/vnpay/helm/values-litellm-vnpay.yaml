@@ -236,10 +236,19 @@ volumes:
   - name: routing-hook
     configMap:
       name: litellm-routing-hook
+  # Hotpatch: force temperature=1 cho moonshot reasoning models (kimi-k2.5)
+  # ConfigMap: kubectl create configmap litellm-moonshot-patch --from-file=transformation.py=... -n litellm
+  - name: moonshot-patch
+    configMap:
+      name: litellm-moonshot-patch
 
 volumeMounts:
   - name: routing-hook
     mountPath: /etc/litellm/hooks
+    readOnly: true
+  - name: moonshot-patch
+    mountPath: /app/litellm/llms/moonshot/chat/transformation.py
+    subPath: transformation.py
     readOnly: true
 
 # ─── Probe tuning — LiteLLM startup ~60-90s (load DB models + init callbacks) ───
