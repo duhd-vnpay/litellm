@@ -76,8 +76,8 @@ proxy_config:
     # ── Tier 1: Kimi K2.5 — simple tasks (format, dịch, tóm tắt) ───────────────
     - model_name: vnpay-simple
       litellm_params:
-        model: anthropic/kimi-k2.5
-        api_base: https://api.moonshot.ai/anthropic
+        model: moonshot/kimi-k2.5
+        api_base: https://api.moonshot.ai/v1
         api_key: os.environ/KIMI_API_KEY
         num_retries: 2
         model_info:
@@ -87,11 +87,11 @@ proxy_config:
           description: "Kimi K2.5 — tác vụ đơn giản, 128K context"
 
     # ── Tier 2: Kimi K2.5 — coding, analysis ─────────────────────────────────
-    # Endpoint: Anthropic-compatible API tại api.moonshot.ai/anthropic
+    # Endpoint: OpenAI-compatible API tại api.moonshot.ai/v1
     - model_name: vnpay-medium
       litellm_params:
-        model: anthropic/kimi-k2.5
-        api_base: https://api.moonshot.ai/anthropic
+        model: moonshot/kimi-k2.5
+        api_base: https://api.moonshot.ai/v1
         api_key: os.environ/KIMI_API_KEY
         num_retries: 2
         model_info:
