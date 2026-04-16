@@ -250,6 +250,10 @@ volumeMounts:
     mountPath: /app/litellm/llms/moonshot/chat/transformation.py
     subPath: transformation.py
     readOnly: true
+  - name: moonshot-patch
+    mountPath: /usr/lib/python3.13/site-packages/litellm/llms/moonshot/chat/transformation.py
+    subPath: transformation.py
+    readOnly: true
 
 # ─── Probe tuning — LiteLLM startup ~60-90s (load DB models + init callbacks) ───
 livenessProbe:
