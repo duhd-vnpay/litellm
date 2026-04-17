@@ -18,9 +18,62 @@ Logic phân loại:
 
 import re
 import logging
+import litellm
 from litellm.integrations.custom_logger import CustomLogger
 
 logger = logging.getLogger("vnpay_routing_hook")
+
+# ── Custom model pricing (models chưa có trong LiteLLM built-in cost map) ────
+# Ref: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+# MiniMax-M2.7 chưa có trong upstream — dùng giá MiniMax-M2.5 ($0.30/$1.20 per MTok)
+_CUSTOM_MODEL_COST = {
+    "minimax/MiniMax-M2.7": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 16384,
+        "litellm_provider": "minimax",
+    },
+    "MiniMax-M2.7": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 16384,
+        "litellm_provider": "minimax",
+    },
+    "openai/minimax": {
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 16384,
+        "litellm_provider": "openai",
+    },
+    "openai/v_minimax": {
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "max_input_tokens": 131072,
+        "max_output_tokens": 16384,
+        "litellm_provider": "openai",
+    },
+    "openai/v_glm46": {
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "max_input_tokens": 128000,
+        "max_output_tokens": 16384,
+        "litellm_provider": "openai",
+    },
+    "openai/v_search": {
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "max_input_tokens": 8192,
+        "max_output_tokens": 0,
+        "litellm_provider": "openai",
+        "mode": "embedding",
+    },
+}
+for _model, _info in _CUSTOM_MODEL_COST.items():
+    litellm.model_cost[_model] = _info
+    logger.info(f"[pricing] registered custom cost: {_model}")
 
 # ── Tier 0: Dữ liệu nhạy cảm VNPAY — bắt buộc on-premise ─────────────────
 SENSITIVE_PATTERNS = [
@@ -98,6 +151,70 @@ ANTHROPIC_MODEL_PATTERN = re.compile(
 MODEL_KIMI = "moonshot/kimi-k2.5"
 
 
+def _sanitize_tool_messages(messages: list[dict]) -> list[dict]:
+    """
+    Strip orphan tool_calls từ conversation history.
+
+    Kimi K2.5 (và nhiều model khác) yêu cầu mọi tool_call_id trong assistant
+    message phải có tool response message tương ứng ngay sau đó. Khi client
+    truncate history (e.g. context window), tool response có thể bị mất →
+    400 "tool_call_id is not found".
+
+    Logic:
+      1. Thu thập tất cả tool_call_id có response (role=tool)
+      2. Với mỗi assistant message có tool_calls, loại bỏ các call không có response
+      3. Nếu assistant message mất hết tool_calls → xóa luôn message đó
+    """
+    if not messages:
+        return messages
+
+    # Collect all tool_call_ids that have a matching tool response
+    responded_ids: set[str] = set()
+    for m in messages:
+        if m.get("role") == "tool" and "tool_call_id" in m:
+            responded_ids.add(m["tool_call_id"])
+
+    sanitized = []
+    removed_count = 0
+    for m in messages:
+        tool_calls = m.get("tool_calls")
+        if m.get("role") == "assistant" and tool_calls and isinstance(tool_calls, list):
+            # Keep only tool_calls that have matching responses
+            valid_calls = [tc for tc in tool_calls if tc.get("id") in responded_ids]
+            orphan_count = len(tool_calls) - len(valid_calls)
+            if orphan_count > 0:
+                removed_count += orphan_count
+                if valid_calls:
+                    # Some calls still valid — keep message with filtered calls
+                    m = {**m, "tool_calls": valid_calls}
+                elif m.get("content"):
+                    # No valid calls but has text content — keep without tool_calls
+                    m = {k: v for k, v in m.items() if k != "tool_calls"}
+                else:
+                    # No valid calls, no content — drop entire message
+                    continue
+        # Drop orphan tool responses (no matching tool_call in any assistant message)
+        if m.get("role") == "tool" and "tool_call_id" in m:
+            # Check if any assistant message in sanitized list has this call
+            has_parent = False
+            for prev in sanitized:
+                if prev.get("role") == "assistant":
+                    for tc in (prev.get("tool_calls") or []):
+                        if tc.get("id") == m["tool_call_id"]:
+                            has_parent = True
+                            break
+                if has_parent:
+                    break
+            if not has_parent:
+                removed_count += 1
+                continue
+        sanitized.append(m)
+
+    if removed_count > 0:
+        logger.info(f"[sanitize] removed {removed_count} orphan tool_call(s)/response(s)")
+    return sanitized
+
+
 def _extract_prompt(data: dict) -> str:
     """Gộp tất cả message content thành 1 string để match pattern."""
     messages = data.get("messages", [])
@@ -125,6 +242,8 @@ class VNPayRoutingHook(CustomLogger):
     Được đăng ký qua litellm_settings.callbacks trong config.yaml.
     """
 
+    _pricing_injected = False
+
     async def async_pre_call_hook(
         self,
         user_api_key_dict,
@@ -132,6 +251,13 @@ class VNPayRoutingHook(CustomLogger):
         data: dict,
         call_type: str,
     ) -> dict:
+        # ── Lazy inject custom pricing (chạy 1 lần duy nhất) ─────────────
+        if not VNPayRoutingHook._pricing_injected:
+            for model, info in _CUSTOM_MODEL_COST.items():
+                litellm.model_cost[model] = info
+            VNPayRoutingHook._pricing_injected = True
+            logger.info(f"[pricing] registered {len(_CUSTOM_MODEL_COST)} custom models")
+
         current_model = data.get("model", "")
 
         # ── Team alias: anthropic/claude* → moonshot/kimi-k2.5 ─────────────
@@ -147,24 +273,42 @@ class VNPayRoutingHook(CustomLogger):
                 data.setdefault("metadata", {})["routing_reason"] = f"team_alias:{team_alias}"
                 current_model = MODEL_KIMI
 
-        # ── MiniMax-M2.7: strip các field không support ─────────────────────
-        # MiniMax Anthropic endpoint không hỗ trợ:
-        #   - output_config (structured output / JSON schema)
-        # → Remove để tránh "invalid params"
-        if current_model == "MiniMax-M2.7":
+        # ── MiniMax: strip unsupported fields + ensure max_tokens ───────────
+        MINIMAX_MODELS = {"vnpay/minimax", "openai/minimax", "MiniMax-M2.7", "minimax"}
+        MINIMAX_DEFAULT_MAX_TOKENS = 16384
+        if current_model in MINIMAX_MODELS or "minimax" in current_model.lower():
             if "output_config" in data:
                 data.pop("output_config", None)
-                logger.info("[routing] stripped output_config for MiniMax-M2.7")
+                logger.info("[routing] stripped output_config for MiniMax")
+            # Ensure max_tokens đủ lớn — MiniMax M2.7 hỗ trợ thinking,
+            # reasoning tokens ăn budget → output bị cắt nếu max_tokens thấp
+            current_max = data.get("max_tokens") or data.get("max_completion_tokens")
+            if not current_max or current_max < MINIMAX_DEFAULT_MAX_TOKENS:
+                logger.info(f"[routing] minimax → set max_tokens={MINIMAX_DEFAULT_MAX_TOKENS} (was: {current_max})")
+                data["max_tokens"] = MINIMAX_DEFAULT_MAX_TOKENS
 
         # ── Kimi K2.5 (reasoning model): force temperature=1 ────────────────
         # Moonshot API chỉ chấp nhận temperature=1 cho reasoning models.
         # Client có thể gửi bất kỳ giá trị nào → override tại đây trước khi
         # request đến LiteLLM router, tránh "invalid temperature" 400 error.
         KIMI_MODELS = {"vnpay-simple", "vnpay-medium", "moonshot/kimi-k2.5", "kimi-k2.5"}
+        KIMI_DEFAULT_MAX_TOKENS = 16384  # 16K — đủ cho reasoning + answer
         if current_model in KIMI_MODELS or "kimi-k2" in current_model.lower():
             if data.get("temperature") != 1:
                 logger.info(f"[routing] kimi reasoning model → force temperature=1 (was: {data.get('temperature')})")
                 data["temperature"] = 1
+            # Ensure max_tokens đủ lớn cho reasoning model — Kimi K2.5 dùng
+            # reasoning tokens (thinking) + text tokens. Nếu max_tokens quá thấp
+            # (e.g. 8192 default), reasoning ăn hết budget → output bị cắt.
+            current_max = data.get("max_tokens") or data.get("max_completion_tokens")
+            if not current_max or current_max < KIMI_DEFAULT_MAX_TOKENS:
+                logger.info(f"[routing] kimi → set max_tokens={KIMI_DEFAULT_MAX_TOKENS} (was: {current_max})")
+                data["max_tokens"] = KIMI_DEFAULT_MAX_TOKENS
+            # Sanitize orphan tool_calls — Kimi yêu cầu mọi tool_call_id phải
+            # có tool response. Client truncate history → 400 error.
+            messages = data.get("messages")
+            if messages:
+                data["messages"] = _sanitize_tool_messages(messages)
 
         # Chỉ override khi model là Claude default (claude-sonnet-4-*, claude-opus-4-*, v.v.)
         # Mọi model khác → client đã chủ động chọn → tôn trọng, không override.

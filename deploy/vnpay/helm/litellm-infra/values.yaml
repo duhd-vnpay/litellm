@@ -20,6 +20,30 @@ postgresql:
       memory: 1Gi
       cpu: "1"
 
+# ─── PgBouncer (connection pooling for PostgreSQL) ───────────────────────────
+pgbouncer:
+  enabled: true
+  image: edoburu/pgbouncer:latest
+  replicas: 1
+  poolMode: transaction           # transaction pooling — best for Prisma
+  maxClientConn: "200"            # max client connections (LiteLLM pods × Prisma pool)
+  defaultPoolSize: "20"           # server connections per pool
+  minPoolSize: "5"                # keep warm connections
+  reservePoolSize: "5"            # extra connections for burst
+  reservePoolTimeout: "3"         # seconds before using reserve pool
+  serverIdleTimeout: "600"        # close idle server connections after 10min
+  serverLifetime: "3600"          # recycle server connections every 1h
+  serverConnectTimeout: "15"      # timeout connecting to PostgreSQL
+  queryWaitTimeout: "120"         # max wait for available server connection
+  authType: scram-sha-256
+  resources:
+    requests:
+      memory: 32Mi
+      cpu: 100m
+    limits:
+      memory: 64Mi
+      cpu: 250m
+
 # ─── Redis ────────────────────────────────────────────────────────────────────
 redis:
   enabled: true

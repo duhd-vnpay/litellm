@@ -2,12 +2,60 @@
 
 VNPay-specific deployment, routing hook, và operational config cho LiteLLM Proxy. Folder này nằm trong fork [duhd-vnpay/litellm](https://github.com/duhd-vnpay/litellm) của upstream BerriAI/litellm.
 
+## Architecture
+
+```
+                                        ┌─────────────────────────────────────────────┐
+                                        │              LiteLLM Namespace              │
+                                        │                                             │
+Client (claude-cli, Copilot, etc.)      │  ┌─────────┐    ┌──────────┐                │
+  │                                     │  │ LiteLLM │───▶│ PgBouncer│──▶ PostgreSQL  │
+  ▼                                     │  │ Pod ×2  │    │(tx pool) │   (StatefulSet)│
+VNPayCloud WAF/CDN (600s)               │  │         │    └──────────┘    15Gi PVC    │
+  │                                     │  │ Routing  │                                │
+  ▼                                     │  │  Hook   │───▶ Redis (cache)              │
+CDN Edge sunny.edgevnpay.vn (600s)      │  └────┬────┘                                │
+  │                                     │       │                                      │
+  ▼                                     └───────┼──────────────────────────────────────┘
+VNPayCloud LB (TCP passthrough)                 │
+  │                                             ▼
+  ▼                                     ┌───────────────────────────────────────┐
+K8s NodePort 30443                      │           LLM Providers               │
+  │                                     │                                       │
+  ▼                                     │  Tier 0: VNPAY GenAI (on-prem, $0)   │
+Nginx Ingress (600s)                    │    └─ GLM-4 (vnpay-sensitive)         │
+  │                                     │    └─ MiniMax M2.7 (vnpay/minimax)   │
+  ▼                                     │  Tier 1: Kimi K2.5 ($0.60/$3 MTok)  │
+LiteLLM Proxy (600s)                    │    └─ 3 API keys, load balanced      │
+                                        │  Tier 2: Claude Sonnet/Opus/Haiku    │
+                                        │  Embedding: BGE-M3 (on-prem, $0)    │
+                                        └───────────────────────────────────────┘
+```
+
+### Timeout Chain (đồng bộ 600s)
+
+| Layer | Timeout | Config |
+|---|---|---|
+| WAF/CDN Origin | 600s | WAF portal |
+| CDN Edge Dynamic Proxy | 600s | WAF portal |
+| VNPayCloud LB | N/A (TCP passthrough) | `loadbalancer.tf` |
+| Nginx Ingress | 600s | Ingress annotations `proxy-read-timeout` |
+| LiteLLM `request_timeout` | 600s | `proxy_server_config.yaml` → `litellm_settings` |
+
+### Database Connection Chain
+
+```
+LiteLLM Pod (Prisma, connection_limit=10, pool_timeout=30s, pgbouncer=true)
+  → PgBouncer (transaction pooling, max_client=200, pool_size=20, idle_timeout=600s)
+    → PostgreSQL 16 (max_connections=100, idle_in_tx_timeout=5min, statement_timeout=5min)
+```
+
 ## Stack
 
-- **LiteLLM Proxy** `v1.83.3-stable` — multi-provider LLM gateway
-- **Infrastructure**: PostgreSQL (StatefulSet), Redis (Deployment), Nginx Ingress
-- **Providers**: VNPAY GenAI on-premise (GLM-4/AIR-4.5), Kimi K2.5 (Anthropic-compat), Claude Sonnet/Opus/Haiku 4.x, MiniMax-M2.7 (Anthropic-compat)
-- **Access path**: Client → VNPayCloud WAF → Nginx Ingress (`api-llm.x.vnshop.cloud`) → LiteLLM proxy → Redis cache + PostgreSQL
+- **LiteLLM Proxy** `v1.83.3-stable` — multi-provider LLM gateway (2 replicas)
+- **Infrastructure**: PostgreSQL 16 (StatefulSet, 15Gi PVC), Redis 7 (Deployment), PgBouncer (Deployment), Nginx Ingress
+- **Providers**: VNPAY GenAI on-premise (GLM-4, MiniMax M2.7), Kimi K2.5 (3 keys load-balanced), Claude Sonnet/Opus/Haiku 4.x, BGE-M3 embedding
+- **Access path**: Client → VNPayCloud WAF/CDN → CDN Edge → LB → Nginx Ingress → LiteLLM → Provider
 - **Cluster**: K8s on VNPayCloud (`sdlc-go-k8s-v2`)
 
 ## Structure
@@ -15,10 +63,16 @@ VNPay-specific deployment, routing hook, và operational config cho LiteLLM Prox
 ```
 deploy/vnpay/
 ├── helm/
-│   ├── litellm-infra/                  # Postgres + Redis + public Ingress chart
+│   ├── litellm-infra/                  # Postgres + Redis + PgBouncer + public Ingress chart
 │   │   ├── Chart.yaml
 │   │   ├── values.yaml
 │   │   └── templates/
+│   │       ├── deployments/
+│   │       │   ├── redis.yaml
+│   │       │   └── pgbouncer.yaml      # PgBouncer connection pooler
+│   │       ├── stateful/
+│   │       │   └── postgresql.yaml
+│   │       └── ingress-public.yaml
 │   ├── litellm-routing-hook/           # Pre-call intelligent router (Python hook chart)
 │   │   ├── Chart.yaml
 │   │   ├── values.yaml
@@ -27,6 +81,7 @@ deploy/vnpay/
 │   │   └── templates/
 │   │       └── configmap.yaml          # Helm render via .Files.Get
 │   ├── values-litellm-vnpay.yaml       # Override values cho upstream LiteLLM helm chart
+│   ├── litellm-health-cronjob.yaml     # CronJob: health check + 24h usage stats (*/5min)
 │   ├── litellm-post-upgrade-job.yaml   # Job: patch num_retries cho DB-stored models
 │   ├── rbac-litellm-readonly.yaml      # RBAC: read-only access cho ops team
 │   └── scripts/
@@ -44,47 +99,86 @@ deploy/vnpay/
 ```bash
 cd deploy/vnpay
 
-# 1. Infrastructure (Postgres + Redis + public ingress)
+# 1. Infrastructure (Postgres + Redis + PgBouncer + public ingress)
 helm upgrade --install litellm-infra ./helm/litellm-infra -n litellm --create-namespace
 
 # 2. Routing hook chart (render ConfigMap từ hook/vnpay_routing_hook.py)
 helm upgrade --install litellm-routing-hook ./helm/litellm-routing-hook -n litellm
 
 # 3. LiteLLM upstream chart với override values
-helm upgrade --install litellm oci://ghcr.io/berriai/litellm-helm:1.82.3 \
+helm upgrade --install litellm oci://ghcr.io/berriai/litellm-helm \
   -f helm/values-litellm-vnpay.yaml -n litellm --wait --timeout=300s
 
 # 4. Post-upgrade job (apply num_retries cho DB models)
 bash helm/scripts/litellm-post-upgrade.sh
 ```
 
-Hoặc dùng wrapper script:
+### Quick deploy routing hook only (no helm)
 
 ```bash
-bash deploy/vnpay/helm/scripts/litellm-deploy-routing.sh
+kubectl create configmap litellm-routing-hook \
+  --from-file=vnpay_routing_hook.py=helm/litellm-routing-hook/hook/vnpay_routing_hook.py \
+  -n litellm --dry-run=client -o yaml | kubectl apply -f -
+kubectl rollout restart deployment litellm -n litellm
 ```
 
-## Routing hook
+## Routing Hook
 
 Pre-call hook tự động phân loại request và route tới provider tối ưu:
 
 | Tier | Trigger | Model | Cost |
 |---|---|---|---|
 | **0 — Sensitive** | PII keywords (CMND, OTP, card number, PII patterns) | `vnpay-sensitive` (GLM-4 on-premise) | Free, zero egress |
-| **1 — Simple** | translate, summarize, format, grammar | `vnpay-simple` (Kimi K2.5) | $0.60/$2.50 per MTok |
-| **2 — Medium** | debug, code review, refactor, SQL, analysis | `vnpay-medium` (Kimi K2.5) | $0.60/$2.50 per MTok |
+| **1 — Simple** | translate, summarize, format, grammar | `vnpay-simple` (Kimi K2.5) | $0.60/$3.00 per MTok |
+| **2 — Medium** | debug, code review, refactor, SQL, analysis | `vnpay-medium` (Kimi K2.5) | $0.60/$3.00 per MTok |
 | **3 — Complex** | (default — không match keyword nào) | client choice | varies |
 
 **Override logic**: Hook **chỉ** override khi client gửi model thuộc Claude default (`claude-(sonnet|opus|haiku)-(4|3|3-5|3-7)-*`). Mọi model khác (`MiniMax-M2.7`, `vnpay-*`, `kimi/*`, `v_glm46`, …) được giữ nguyên — tôn trọng client chọn tường minh.
 
-**Edit hook**:
-1. Sửa `helm/litellm-routing-hook/hook/vnpay_routing_hook.py`
-2. `helm upgrade --install litellm-routing-hook ./helm/litellm-routing-hook -n litellm`
-3. `kubectl rollout restart deployment/litellm -n litellm` (nếu hook đã được mount)
+### Hook features
 
-## Networking & IP logging
+| Feature | Description |
+|---|---|
+| **Team alias redirect** | Teams trong `TEAM_CLAUDE_TO_KIMI_ALIASES` (DVNH, DVTT, GSVH, THHT, TTKHDL, UDDD, eFIN) → redirect Claude → Kimi K2.5 |
+| **Custom pricing injection** | Lazy inject `litellm.model_cost` cho MiniMax-M2.7, openai/minimax, openai/v_glm46, openai/v_search (chạy 1 lần sau proxy startup) |
+| **Kimi temperature fix** | Force `temperature=1` cho reasoning models (Kimi K2.5) |
+| **Kimi max_tokens** | Default `max_tokens=16384` nếu client không set hoặc set thấp hơn |
+| **MiniMax max_tokens** | Default `max_tokens=16384`, strip `output_config` (unsupported) |
+| **Orphan tool_call sanitize** | Strip orphan `tool_calls` và tool responses từ conversation history — tránh Kimi 400 error khi client truncate history |
 
-Traffic flow: `Client (public IP) → VNPayCloud WAF → LB (SNAT) → K8s Node → Nginx Ingress → LiteLLM pod`
+## Models
+
+### Config-based (values-litellm-vnpay.yaml)
+
+| Model Name | Provider | Cost | Notes |
+|---|---|---|---|
+| `vnpay-sensitive` | VNPAY GenAI GLM-4 | $0 | On-premise, zero egress |
+| `v_glm46` | VNPAY GenAI GLM-4 | $0 | Legacy alias |
+| `vnpay/minimax` | VNPAY GenAI MiniMax M2.7 | $0 | On-premise, thinking support |
+| `vnpay-simple` | Kimi K2.5 | $0.60/$3.00 MTok | Simple tasks |
+| `vnpay-medium` | Kimi K2.5 | $0.60/$3.00 MTok | Coding/analysis |
+| `claude-sonnet` | Anthropic Claude Sonnet 4.6 | $3/$15 MTok | Complex reasoning |
+| `claude-opus` | Anthropic Claude Opus 4.6 | $15/$75 MTok | Deep reasoning |
+| `text-embedding-3-small` | VNPAY GenAI BGE-M3 | $0 | 1024 dims, on-premise |
+
+### DB-stored models (added via UI/API)
+
+Kimi K2.5 (3 keys load-balanced), Claude Haiku/Sonnet/Opus variants, MiniMax-M2.7 (cloud). Managed via `store_model_in_db: true`.
+
+## Fallback Chain
+
+```
+claude-opus → claude-sonnet → vnpay-medium → vnpay-simple
+moonshot/kimi-k2.5 → vnpay/minimax (on-premise)
+
+Context window overflow:
+  vnpay-simple (128K) → claude-sonnet
+  vnpay-medium (128K) → claude-sonnet
+```
+
+## Networking & IP Logging
+
+Traffic flow: `Client (public IP) → VNPayCloud WAF/CDN → CDN Edge → LB (SNAT) → K8s Node → Nginx Ingress → LiteLLM pod`
 
 Để LiteLLM ghi đúng client IP vào spend log:
 
@@ -92,29 +186,57 @@ Traffic flow: `Client (public IP) → VNPayCloud WAF → LB (SNAT) → K8s Node 
 2. **Nginx Ingress**:
    - `nginx.ingress.kubernetes.io/use-forwarded-headers: "true"`
    - `nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"`
-3. **LiteLLM** `general_settings.use_x_forwarded_for: true` (đã set trong `values-litellm-vnpay.yaml`)
-
-Whitelist `nginx.ingress.kubernetes.io/whitelist-source-range` đã **disable** mặc định trong `litellm-infra/values.yaml` (`enforceAllowlist: false`) — vì WAF đã filter tầng trước, và bật allowlist sau khi WAF forward XFF sẽ block public IP của client (false positive). Bật lại nếu cần defense-in-depth.
+3. **LiteLLM** `general_settings.use_x_forwarded_for: true`
 
 ## Operations
 
+### Secrets
+
 - **Master key**: `kubectl get secret litellm-master-key -n litellm -o jsonpath='{.data.PROXY_MASTER_KEY}' | base64 -d`
-- **Provider keys**: stored trong secret `litellm-provider-keys` (Anthropic, Kimi, MiniMax, VNPAY GenAI)
-- **Spend log query** (qua DB):
-  ```bash
-  kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c '
-    SELECT request_id, model_group, metadata->>'"'"'requester_ip_address'"'"' as ip
-    FROM "LiteLLM_SpendLogs" ORDER BY "startTime" DESC LIMIT 10
-  '
-  ```
-- **Tail routing decisions**: `kubectl logs -n litellm -l app=litellm -f | grep '\[routing\]'`
+- **Provider keys**: stored trong secret `litellm-provider-keys` (Anthropic, Kimi, MiniMax, VNPAY GenAI, Redis)
+- **DB credentials**: secret `litellm-postgres-credentials`
 
-## Known incidents & mitigations
+### Health & Monitoring
 
-- **2026-04-14 — initdb data loss**: Mount ConfigMap vào `/docker-entrypoint-initdb.d/` + restart pod sẽ trigger initdb và xóa toàn bộ PostgreSQL data. **Không bao giờ** mount script vào path đó. Dùng `ALTER SYSTEM SET ... ; SELECT pg_reload_conf();` để tune Postgres mà không cần restart.
-- **MiniMax `output_config` reject**: MiniMax Anthropic endpoint không support `output_config` (structured output). Fix: upstream patch `litellm/llms/minimax/messages/transformation.py` strip param trước khi forward.
+- **Health CronJob**: `litellm-health-check` — runs */5min, checks liveliness, readiness, PVC usage, 24h spend stats
+- **Backup CronJob**: `litellm-pg-backup` — daily 02:00 UTC, pg_dump to PVC, 7-day retention
+- **SpendLogs cleanup**: Built-in, `maximum_spend_logs_retention_period: 7d`, runs 03:00 UTC daily
+- **Nginx log format**: Includes `rt=` (request time), `uct=` (upstream connect time), `urt=` (upstream response time)
+
+### Useful commands
+
+```bash
+# Spend log query
+kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c '
+  SELECT request_id, model_group, status, spend,
+         EXTRACT(EPOCH FROM ("endTime" - "startTime")) as seconds
+  FROM "LiteLLM_SpendLogs" ORDER BY "startTime" DESC LIMIT 10'
+
+# Tail routing decisions
+kubectl logs -n litellm -l app.kubernetes.io/name=litellm -f | grep '\[routing\]'
+
+# DB connections via PgBouncer
+kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c \
+  "SELECT client_addr, count(*) FROM pg_stat_activity WHERE datname='litellm' GROUP BY 1"
+
+# Manual backup
+kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
+```
+
+## Known Incidents & Mitigations
+
+| Date | Incident | Root Cause | Fix |
+|---|---|---|---|
+| 2026-04-14 | initdb data loss | Mount ConfigMap vào `/docker-entrypoint-initdb.d/` + restart → initdb xóa data | Không mount vào initdb path |
+| 2026-04-16 | PostgreSQL data loss on pod reschedule | PVC mount `/var/lib/postgresql` nhưng PGDATA ở `/var/lib/postgresql/data` → data trong overlay | Fix mountPath = PGDATA, explicit PGDATA env |
+| 2026-04-17 | Prisma "Client not connected" | Direct DB connection, no keepalive, no pool | Deploy PgBouncer, add Prisma pool params |
+| 2026-04-17 | Kimi 400 "tool_call_id not found" | Client truncate history, orphan tool_calls | Sanitize in routing hook |
+| 2026-04-17 | Kimi output truncated (8K reasoning, 1 text) | Default max_tokens=8192 too low for reasoning model | Hook force max_tokens=16384 |
+| 2026-04-17 | WAF 504 timeout 50s | CDN Edge dynamic proxy hardcoded 50s | Escalated to VNPayCloud infra, increased to 600s |
+| 2026-03-24 | Supply chain compromise v1.82.7/v1.82.8 | TeamPCP credential stealer in upstream | Pin to digest, IOC check before upgrade |
 
 ## History
 
 - **2026-04-15**: Tách từ repo `git.vnpay.vn/duhd/agentic-coding` qua `git filter-repo` → push lên `github.com/duhd-vnpay/litellm-vnpay` (private)
 - **2026-04-15**: Gộp `litellm-vnpay` vào fork `github.com/duhd-vnpay/litellm` qua `git subtree add --prefix=deploy/vnpay`. Repo standalone đã archive read-only.
+- **2026-04-17**: Deploy PgBouncer, Kimi 3-key load balance, BGE-M3 embedding, SpendLogs retention 7d, timeout chain đồng bộ 600s.

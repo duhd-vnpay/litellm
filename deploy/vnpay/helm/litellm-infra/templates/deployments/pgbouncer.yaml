@@ -1,0 +1,88 @@
+{{- if .Values.pgbouncer.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-pgbouncer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-pgbouncer
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app: litellm-pgbouncer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-pgbouncer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: litellm-pgbouncer
+spec:
+  replicas: {{ .Values.pgbouncer.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: litellm-pgbouncer
+  template:
+    metadata:
+      labels:
+        app: litellm-pgbouncer
+    spec:
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: username
+            - name: POSTGRES_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: password
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASS)@litellm-postgresql:5432/{{ .Values.postgresql.database }}"
+            - name: AUTH_TYPE
+              value: {{ .Values.pgbouncer.authType | default "scram-sha-256" }}
+            - name: POOL_MODE
+              value: {{ .Values.pgbouncer.poolMode | default "transaction" }}
+            - name: MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | default "200" | quote }}
+            - name: DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | default "20" | quote }}
+            - name: MIN_POOL_SIZE
+              value: {{ .Values.pgbouncer.minPoolSize | default "5" | quote }}
+            - name: RESERVE_POOL_SIZE
+              value: {{ .Values.pgbouncer.reservePoolSize | default "5" | quote }}
+            - name: RESERVE_POOL_TIMEOUT
+              value: {{ .Values.pgbouncer.reservePoolTimeout | default "3" | quote }}
+            - name: SERVER_IDLE_TIMEOUT
+              value: {{ .Values.pgbouncer.serverIdleTimeout | default "600" | quote }}
+            - name: SERVER_LIFETIME
+              value: {{ .Values.pgbouncer.serverLifetime | default "3600" | quote }}
+            - name: SERVER_CONNECT_TIMEOUT
+              value: {{ .Values.pgbouncer.serverConnectTimeout | default "15" | quote }}
+            - name: QUERY_WAIT_TIMEOUT
+              value: {{ .Values.pgbouncer.queryWaitTimeout | default "120" | quote }}
+          resources:
+            {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "litellm"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "litellm"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+{{- end }}

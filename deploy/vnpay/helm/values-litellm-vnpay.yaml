@@ -25,13 +25,15 @@ image:
   pullPolicy: IfNotPresent
   tag: "v1.83.3-stable"
 
-# ─── Database (use litellm-infra's PostgreSQL) ────────────────────────────────
+# ─── Database (via PgBouncer → PostgreSQL) ────────────────────────────────────
+# PgBouncer: transaction pooling, connection reuse, dead connection detection
+# Prisma params: connection_limit=10 per pod, pool_timeout=30s, connect_timeout=10s
 db:
   useExisting: true
   deployStandalone: false
-  endpoint: litellm-postgresql
+  endpoint: litellm-pgbouncer
   database: litellm
-  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)"
+  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?connection_limit=10&pool_timeout=30&connect_timeout=10&pgbouncer=true"
   secret:
     name: litellm-postgres-credentials
     usernameKey: username
@@ -55,16 +57,16 @@ proxy_config:
     # ── Tier 0: VNPAY GenAI on-premise — sensitive data, zero egress ──────────
     - model_name: vnpay-sensitive
       litellm_params:
-        model: openai/v_glm46
-        api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
+        model: openai/v_minimax
+        api_base: https://genai.vnpay.vn/aigateway/llm_minimax/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
-        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
+        drop_params: true # Drop unsupported params (e.g. context_management từ Claude clients)
       model_info:
         id: vnpay-sensitive
-        input_cost_per_token: 0              # On-premise, no API cost
+        input_cost_per_token: 0 # On-premise, no API cost
         output_cost_per_token: 0
-        description: "On-premise GLM-4 — dữ liệu nhạy cảm, zero data egress"
+        description: "On-premise MiniMax-M2.7 — dữ liệu nhạy cảm, zero data egress"
 
     # Legacy alias — giữ để backward compat với client đang dùng v_glm46
     - model_name: v_glm46
@@ -73,54 +75,74 @@ proxy_config:
         api_base: https://genai.vnpay.vn/aigateway/llm_glm46/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
-        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
+        drop_params: true # Drop unsupported params (e.g. context_management từ Claude clients)
       model_info:
         id: v_glm46
-        input_cost_per_token: 0              # On-premise, no API cost
+        input_cost_per_token: 0 # On-premise, no API cost
         output_cost_per_token: 0
 
     # ── MiniMax M2.7 230B on-premise — OpenAI-compatible, thinking support ──────
     - model_name: vnpay/minimax
       litellm_params:
-        model: openai/minimax
+        model: openai/v_minimax
         api_base: https://genai.vnpay.vn/aigateway/llm_minimax/v1
         api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
-        drop_params: true  # Drop unsupported params (e.g. context_management)
+        drop_params: true # Drop unsupported params (e.g. context_management)
       model_info:
         id: vnpay-minimax
-        input_cost_per_token: 0              # On-premise, no API cost
+        input_cost_per_token: 0 # On-premise, no API cost
         output_cost_per_token: 0
+        max_input_tokens: 131072
+        max_output_tokens: 16384
         description: "MiniMax M2.7 230B on-premise — zero egress, thinking support"
 
-    # ── Tier 1: Kimi K2.5 — simple tasks (format, dịch, tóm tắt) ───────────────
+    # ── Embedding: BGE-M3 on-premise — multilingual dense/sparse retrieval ──────
+    - model_name: text-embedding-3-small
+      litellm_params:
+        model: openai/v_search
+        api_base: https://genai.vnpay.vn/aigateway/embed/v1
+        api_key: os.environ/VNPAY_GENAI_API_KEY
+        num_retries: 2
+      model_info:
+        id: vnpay-embedding-bge-m3
+        mode: embedding
+        input_cost_per_token: 0 # On-premise, no API cost
+        output_cost_per_token: 0
+        max_input_tokens: 8192
+        description: "BGE-M3 on-premise — 1024 dims, multilingual embedding, zero egress"
+
+    # ── Tier 1: MiniMax M2.7 on-premise — simple tasks ─────────────────────────
     - model_name: vnpay-simple
       litellm_params:
-        model: moonshot/kimi-k2.5
-        api_base: https://api.moonshot.ai/v1
-        api_key: os.environ/KIMI_API_KEY
+        model: openai/v_minimax
+        api_base: https://genai.vnpay.vn/aigateway/llm_minimax/v1
+        api_key: os.environ/VNPAY_GENAI_API_KEY
         num_retries: 2
-        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
+        drop_params: true # Drop unsupported params (e.g. context_management)
       model_info:
         id: vnpay-simple
-        input_cost_per_token: 0.0000006    # $0.60/MTok
-        output_cost_per_token: 0.0000025   # $2.50/MTok
-        description: "Kimi K2.5 — tác vụ đơn giản, 128K context"
+        input_cost_per_token: 0 # On-premise, no API cost
+        output_cost_per_token: 0
+        max_input_tokens: 131072
+        max_output_tokens: 16384
+        description: "MiniMax M2.7 on-premise — tác vụ đơn giản, zero egress"
 
-    # ── Tier 2: Kimi K2.5 — coding, analysis ─────────────────────────────────
-    # Endpoint: OpenAI-compatible API tại api.moonshot.ai/v1
+    # ── Tier 2: Kimi K2.5 — coding, analysis (cloud API) ────────────────────
     - model_name: vnpay-medium
       litellm_params:
         model: moonshot/kimi-k2.5
         api_base: https://api.moonshot.ai/v1
         api_key: os.environ/KIMI_API_KEY
         num_retries: 2
-        drop_params: true  # Drop unsupported params (e.g. context_management từ Claude clients)
+        drop_params: true # Drop unsupported params (e.g. context_management từ Claude clients)
       model_info:
         id: vnpay-medium
-        input_cost_per_token: 0.0000006    # $0.60/MTok
-        output_cost_per_token: 0.0000025   # $2.50/MTok
-        description: "Kimi K2.5 — coding, debug, analysis"
+        input_cost_per_token: 0.0000006 # $0.60/MTok
+        output_cost_per_token: 0.000003 # $3.00/MTok — ref: platform.kimi.ai/docs/pricing/chat-k25
+        max_input_tokens: 262144
+        max_output_tokens: 16384 # Kimi K2.5 — giảm từ 64K để tiết kiệm resource
+        description: "Kimi K2.5 — coding, debug, analysis, 262K context"
 
     # ── Tier 3: Claude Sonnet 4.6 — complex reasoning ─────────────────────────
     - model_name: claude-sonnet
@@ -152,9 +174,13 @@ proxy_config:
     enable_content_filtering: false
     # Trust X-Forwarded-For header từ nginx ingress → ghi đúng client IP vào spend log
     use_x_forwarded_for: true
+    # ── SpendLogs retention — auto-cleanup logs cũ hơn 7 ngày ─────────────
+    # Xóa batch 1000 rows/lần lúc 3:00 AM UTC
+    maximum_spend_logs_retention_period: "7d"
+    maximum_spend_logs_cleanup_cron: "0 3 * * *"
 
   router_settings:
-    num_retries: 2  # Router-level global — correct scope for v1.83.3.rc.1 bug fix
+    num_retries: 2 # Router-level global — correct scope for v1.83.3.rc.1 bug fix
     # Fallback chain: nếu provider fail → thử provider tiếp theo
     fallbacks:
       - claude-opus:
@@ -162,21 +188,21 @@ proxy_config:
       - claude-sonnet:
           - vnpay-medium
       - vnpay-medium:
-          - vnpay-simple      # Kimi medium fail → Kimi simple
+          - vnpay-simple # Kimi medium fail → Kimi simple
     # Context window overflow → escalate lên tier cao hơn
     context_window_fallbacks:
       - vnpay-simple:
-          - claude-sonnet      # Kimi 128K overflow → Claude Sonnet
+          - claude-sonnet # Kimi 128K overflow → Claude Sonnet
       - vnpay-medium:
-          - claude-sonnet      # Kimi 128K overflow → Claude Sonnet
-    allowed_fails: 2       # cho phép fail 2 lần trước khi cooldown
-    cooldown_time: 60      # giây cooldown khi provider bị đánh dấu fail
+          - claude-sonnet # Kimi 128K overflow → Claude Sonnet
+    allowed_fails: 2 # cho phép fail 2 lần trước khi cooldown
+    cooldown_time: 60 # giây cooldown khi provider bị đánh dấu fail
 
   litellm_settings:
-    num_retries: 2  # Library-level fallback (may not reach router in v1.83.3.rc.1)
-    modify_params: true  # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
-    use_chat_completions_url_for_anthropic_messages: true  # Force chat/completions path — tắt Responses API routing cho openai provider (vnpay/minimax on-premise)
-    request_timeout: 300
+    num_retries: 2 # Library-level fallback (may not reach router in v1.83.3.rc.1)
+    modify_params: true # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
+    use_chat_completions_url_for_anthropic_messages: true # Force chat/completions path — tắt Responses API routing cho openai provider (vnpay/minimax on-premise)
+    request_timeout: 600
     cache: true
     cache_params:
       type: redis
@@ -184,6 +210,8 @@ proxy_config:
       port: 6379
       password: os.environ/REDIS_PASSWORD
     # ── Pre-call routing hook ─────────────────────────────────────────────────
+    # Custom model pricing (MiniMax-M2.7, openai/v_minimax, openai/v_glm46) được
+    # inject vào litellm.model_cost qua vnpay_routing_hook.py (lazy init)
     # Mount: /etc/litellm/hooks/vnpay_routing_hook.py (xem volumes bên dưới)
     callbacks:
       - /etc/litellm/hooks/vnpay_routing_hook.vnpay_routing_hook
@@ -203,8 +231,8 @@ ingress:
   className: nginx
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
     nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"
     nginx.ingress.kubernetes.io/forwarded-for-header: "X-Forwarded-For"
@@ -280,29 +308,29 @@ volumeMounts:
 
 # ─── Probe tuning — LiteLLM startup ~60-90s (load DB models + init callbacks) ───
 livenessProbe:
-  initialDelaySeconds: 60   # cho đủ thời gian startup trước khi bắt đầu check
-  periodSeconds: 30         # giảm từ 10s → probe ít aggressive hơn
-  timeoutSeconds: 30        # tăng từ 10s → tránh false-positive khi CPU throttle
+  initialDelaySeconds: 60 # cho đủ thời gian startup trước khi bắt đầu check
+  periodSeconds: 30 # giảm từ 10s → probe ít aggressive hơn
+  timeoutSeconds: 30 # tăng từ 10s → tránh false-positive khi CPU throttle
   failureThreshold: 3
 
 readinessProbe:
   initialDelaySeconds: 30
-  periodSeconds: 15         # giảm tần suất check khi pod busy
-  timeoutSeconds: 15        # tăng từ 5s → 15s tránh false-positive khi CPU throttle
+  periodSeconds: 15 # giảm tần suất check khi pod busy
+  timeoutSeconds: 15 # tăng từ 5s → 15s tránh false-positive khi CPU throttle
   failureThreshold: 3
 
 startupProbe:
   initialDelaySeconds: 0
   periodSeconds: 10
   timeoutSeconds: 5
-  failureThreshold: 30      # 30 × 10s = 5 phút max startup window
+  failureThreshold: 30 # 30 × 10s = 5 phút max startup window
 
 # ─── Extra env vars ───────────────────────────────────────────────────────────
 # Format: list [{name, value}] — upstream chart dùng toYaml trực tiếp vào container env
 extraEnvVars:
   - name: LITELLM_LOG
-    value: "INFO"                # DEBUG → INFO: giảm CPU/IO đáng kể khi production
+    value: "INFO" # DEBUG → INFO: giảm CPU/IO đáng kể khi production
   - name: PYTHONPATH
     value: "/etc/litellm/hooks"
   - name: LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES
-    value: "true"                # Force chat/completions path cho openai provider — fix vnpay/minimax on-premise
+    value: "true" # Force chat/completions path cho openai provider — fix vnpay/minimax on-premise
