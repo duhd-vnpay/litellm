@@ -41,6 +41,22 @@ def _extract_teleport_email(jwt_str: str) -> str:
         return ""
 
 
+async def _lookup_user_role(email: str) -> str:
+    """Query existing user_role from LiteLLM_UserTable. Default app_user if not found."""
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            return "app_user"
+        user = await prisma_client.db.litellm_usertable.find_unique(
+            where={"user_id": email}
+        )
+        if user and getattr(user, "user_role", None):
+            return user.user_role
+    except Exception as exc:
+        _logger.warning("user role lookup failed for %s: %s", email, exc)
+    return "app_user"
+
+
 async def _make_ui_session(email: str) -> str:
     """Tạo LiteLLM key + JWT cho UI session. Return jwt_token string."""
     import litellm
@@ -49,6 +65,8 @@ async def _make_ui_session(email: str) -> str:
     from litellm.proxy.management_endpoints.key_management_endpoints import (
         generate_key_helper_fn,
     )
+
+    user_role = await _lookup_user_role(email)
 
     key_data = await generate_key_helper_fn(
         request_type="user",
@@ -59,18 +77,20 @@ async def _make_ui_session(email: str) -> str:
         spend=0,
         user_id=email,
         user_email=email,
-        user_role="app_user",
+        user_role=user_role,
         team_id="litellm-dashboard",
         max_budget=litellm.max_ui_session_budget,
         key_alias=f"UI SSO: {email}",
     )
 
+    # Field names MUST match litellm.types.proxy.ui_sso.ReturnedUITokenObject
+    # (key not id — backend auth reads jwt["key"] to look up the API token)
     return pyjwt.encode(
         {
-            "id": key_data.get("token", ""),
             "user_id": email,
+            "key": key_data.get("token", ""),
             "user_email": email,
-            "user_role": "app_user",
+            "user_role": user_role,
             "login_method": "sso",
             "premium_user": False,
             "auth_header_name": "Authorization",
@@ -91,7 +111,7 @@ def _register_routes() -> None:
         # ── /teleport-sso — Teleport App Access flow ──────────────────────────────
         # Teleport inject Teleport-Jwt-Assertion header sau khi user đã auth qua Google.
         # Cần cấu hình Teleport app rewrite.redirect: /teleport-sso
-        @app.get("/teleport-sso", include_in_schema=False)
+        @app.api_route("/teleport-sso", methods=["GET", "POST", "HEAD"], include_in_schema=False)
         async def teleport_sso_login(request: Request):
             jwt_str = request.headers.get("Teleport-Jwt-Assertion", "")
             email = _extract_teleport_email(jwt_str) if jwt_str else ""
@@ -103,10 +123,12 @@ def _register_routes() -> None:
             try:
                 jwt_token = await _make_ui_session(email)
                 _logger.info("Teleport SSO: session created for %s", email)
-                return RedirectResponse(
-                    f"/ui/?token={jwt_token}&userID={email}",
-                    status_code=303,
-                )
+                # Match LiteLLM native flow: cookie-only handoff, `?login=success`
+                # flag triggers UI to read cookie. Avoid token in URL (race: UI may
+                # fire /models before useEffect extracts URL token → Bearer undefined).
+                response = RedirectResponse("/ui/?login=success", status_code=303)
+                response.set_cookie(key="token", value=jwt_token)
+                return response
             except Exception as exc:
                 _logger.error("Teleport SSO: session error for %s: %s", email, exc)
                 return RedirectResponse("/ui", status_code=302)
@@ -125,10 +147,9 @@ def _register_routes() -> None:
             try:
                 jwt_token = await _make_ui_session(email)
                 _logger.info("oauth2-proxy SSO: session created for %s", email)
-                return RedirectResponse(
-                    f"/ui/?token={jwt_token}&userID={email}",
-                    status_code=303,
-                )
+                response = RedirectResponse("/ui/?login=success", status_code=303)
+                response.set_cookie(key="token", value=jwt_token)
+                return response
             except Exception as exc:
                 _logger.error("oauth2-proxy SSO: session error for %s: %s", email, exc)
                 return RedirectResponse("/oauth2/sign_out", status_code=302)
@@ -151,13 +172,15 @@ async def vnpay_google_sso(result):
         getattr(result, "email", None)
         or getattr(result, "preferred_username", None)
         or ""
-    )
+    ).strip().lower()
+
+    user_role = await _lookup_user_role(email) if email else "app_user"
 
     return SSOUserDefinedValues(
         models=[],
         user_id=email or "unknown",
         user_email=email or None,
-        user_role="app_user",
+        user_role=user_role,
         max_budget=None,
         budget_duration=None,
     )

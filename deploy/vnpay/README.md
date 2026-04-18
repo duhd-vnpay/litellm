@@ -133,18 +133,36 @@ kubectl rollout restart deployment litellm -n litellm
 
 UI tại `litellm.x.vnshop.cloud` yêu cầu đăng nhập Google `@vnpay.vn`. API tại `api-llm.x.vnshop.cloud` không bị ảnh hưởng.
 
-### Flow
+### Two supported flows
+
+**Flow 1 — Teleport App Access** (khi truy cập qua Teleport, production):
 
 ```
-Browser → litellm.x.vnshop.cloud
-  → Nginx auth_request → oauth2-proxy /oauth2/auth
-  → Chưa login → redirect /oauth2/start?rd=/vnpay-sso
-  → Google OAuth (vnpay.vn domain only)
-  → oauth2-proxy callback → set cookie
-  → redirect /vnpay-sso (nginx forward X-Auth-Request-Email header)
-  → LiteLLM tạo session key → redirect /ui/?token=<jwt>
-  → UI dashboard (không hỏi user/pass)
+Browser → litellm.x.vnshop.cloud (Teleport)
+  → Teleport Google SSO
+  → Teleport inject `Teleport-Jwt-Assertion` header, forward → /teleport-sso
+  → LiteLLM decode JWT → extract email → lookup user_role từ DB
+  → set `token` cookie (JWT) → redirect /ui/?login=success
+  → UI đọc cookie → accessToken context → API calls thành công
 ```
+
+**Flow 2 — oauth2-proxy** (fallback, không qua Teleport):
+
+```
+Browser → nginx auth_request → oauth2-proxy /oauth2/auth
+  → Google OAuth (vnpay.vn domain only)
+  → oauth2-proxy set cookie → forward `X-Auth-Request-Email` → /vnpay-sso
+  → LiteLLM tạo session → set cookie → redirect /ui/?login=success
+```
+
+### Handoff pattern (quan trọng)
+
+Phải **match chính xác** LiteLLM native SSO:
+- Cookie-only (không truyền token trong URL) — tránh race condition UI fire `/models` trước khi useEffect đọc URL
+- Redirect `/ui/?login=success` với **trailing slash** — không có slash sẽ bị LiteLLM StaticFiles auto-redirect 307 dùng `request.base_url` = HTTP nội bộ → mixed content warning khi page đang HTTPS
+- JWT payload field name `key` (không phải `id`) — match `ReturnedUITokenObject` schema, backend auth dùng `jwt["key"]` để lookup API token
+- JWT `user_role` đọc từ DB qua `_lookup_user_role()` — preserve `proxy_admin` qua các lần login, không hardcode `app_user`
+- SSO endpoint accept GET + POST + HEAD — Teleport có thể probe bằng HEAD, proxy-initiated POST
 
 ### Components
 
@@ -153,7 +171,15 @@ Browser → litellm.x.vnshop.cloud
 | `oauth2-proxy` | `oauth2-proxy.yaml` | Google provider, `--email-domain=vnpay.vn`, `--set-xauthrequest=true` |
 | `/oauth2/*` ingress | `ingress-oauth2-proxy.yaml` | Không có auth-url annotation — oauth2-proxy tự handle |
 | LiteLLM ingress | `values-litellm-vnpay.yaml` → `ingress.annotations` | `auth-url`, `auth-signin`, `auth-snippet` (Bearer bypass) |
-| SSO handler | `hook/vnpay_sso_handler.py` | Đăng ký `/vnpay-sso` route lên FastAPI, tạo LiteLLM session |
+| SSO handler | `hook/vnpay_sso_handler.py` | Đăng ký `/teleport-sso` + `/vnpay-sso` routes lên FastAPI |
+
+### User identity convention
+
+Tất cả user (cả invited UI lẫn SSO-created) phải có `user_id = email`. Users cũ tạo qua UI invite có `user_id = UUID` — đã migrate sang email (xem incident 2026-04-18 migration) và cascade update các FK:
+- `LiteLLM_VerificationToken.user_id/created_by/updated_by`
+- `LiteLLM_SpendLogs."user"`, `LiteLLM_DailyUserSpend.user_id`
+- `LiteLLM_TeamTable.members_with_roles` (JSON array)
+- `LiteLLM_InvitationLink`, `LiteLLM_OrganizationMembership` (auto qua FK `ON UPDATE CASCADE`)
 
 ### Bearer token bypass
 
@@ -286,6 +312,11 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 | 2026-04-18 | NetworkPolicy egress block Redis/DNS | Egress NP trên litellm namespace chặn toàn bộ egress (Redis, DNS, PgBouncer) | Chuyển sang Ingress NP trên sdlc-go-prod thay vì Egress NP trên litellm |
 | 2026-04-18 | vnpay_sso_handler ImportError | `get_instance_fn` resolve path relative to config dir (`/etc/litellm/`) nhưng file chỉ mount ở `/etc/litellm/hooks/` | Thêm subPath volumeMount tại `/etc/litellm/vnpay_sso_handler.py` |
 | 2026-04-18 | Prisma migrate advisory lock timeout | PgBouncer transaction mode không giữ session → `pg_advisory_lock` timeout mỗi restart | Chuyển PgBouncer sang session pooling mode |
+| 2026-04-18 | SSO user luôn hiện non-admin | Handler hardcode `user_role="app_user"` cho generate_key + JWT — override DB role mỗi login | `_lookup_user_role()` query DB trước khi encode JWT |
+| 2026-04-18 | UI `Bearer undefined` 401 dù JWT đúng role | JWT dùng field `id` nhưng backend auth đọc `jwt["key"]` (ReturnedUITokenObject schema) → không lookup được API token | Đổi field `id` → `key` trong JWT payload |
+| 2026-04-18 | UI race: `/models` 401 trước khi useEffect đọc URL | Token trong URL `?token=...` — UI fire `/models` trước khi xử lý URL param | Cookie-only handoff, redirect `/ui/?login=success` (match native) |
+| 2026-04-18 | Mixed content warning khi redirect /ui | Redirect `/ui` (no slash) trigger StaticFiles 307 → `request.base_url` = HTTP internal → Location `http://...` khi page HTTPS | Redirect `/ui/?login=success` với trailing slash, skip auto-redirect |
+| 2026-04-18 | UI-invited users có user_id=UUID conflict với SSO user_id=email | Gây duplicate record/cô lập keys+spend khi user login SSO lần đầu | Migration: UPDATE PK + cascade FK cho 13 users (VerificationToken, SpendLogs 11.9K, DailyUserSpend, TeamTable.members_with_roles JSON) |
 | 2026-03-24 | Supply chain compromise v1.82.7/v1.82.8 | TeamPCP credential stealer in upstream | Pin image digest, IOC scan trước upgrade |
 
 ## History
@@ -295,3 +326,4 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-17**: Deploy PgBouncer, Kimi 3-key load balance, BGE-M3 embedding, SpendLogs retention 7d, timeout chain đồng bộ 600s.
 - **2026-04-18**: Pin image digest (IoC verify sau supply chain alert), OpenTelemetry → Jaeger sdlc-go-prod:4317.
 - **2026-04-18**: Google SSO cho UI `litellm.x.vnshop.cloud` — oauth2-proxy + `/vnpay-sso` auto-login endpoint, domain `@vnpay.vn`, API endpoint `api-llm.x.vnshop.cloud` không bị ảnh hưởng. Fix PgBouncer session mode (Prisma advisory lock compat).
+- **2026-04-18**: Thêm `/teleport-sso` endpoint (Teleport App Access via `Teleport-Jwt-Assertion` header), SSO handler preserve role từ DB thay vì hardcode `app_user`, JWT payload match `ReturnedUITokenObject` schema (`key` field), cookie-only handoff `/ui/?login=success`. Migration `user_id` UUID → email cho 13 UI-invited users (cascade FK + FK auto-update + 11.9K SpendLogs + `members_with_roles` JSON).
