@@ -1,0 +1,35 @@
+# NetworkPolicy: Allow goclaw-ops (sdlc-go-prod) to query PostgreSQL directly
+# Purpose: GoClaw health check queries usage stats via Service DNS instead of kubectl exec
+# Host: litellm-postgresql.litellm.svc.cluster.local:5432
+# Apply: kubectl apply -f networkpolicy-goclaw-db-access.yaml
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-goclaw-to-postgresql
+  namespace: litellm
+  labels:
+    managed-by: scotty-ops
+    purpose: goclaw-health-check
+spec:
+  podSelector:
+    matchLabels:
+      app: litellm-postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from sdlc-go-prod namespace (GoClaw health check)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sdlc-go-prod
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow from litellm namespace (existing CronJob, LiteLLM proxy)
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432

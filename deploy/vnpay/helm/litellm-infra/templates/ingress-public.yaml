@@ -1,4 +1,33 @@
 {{- if .Values.publicIngress.enabled }}
+---
+# Redirect /ui từ API endpoint sang UI host (Teleport-protected)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm-public-ui-redirect
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/permanent-redirect: "https://{{ .Values.publicIngress.uiHost }}/ui"
+    nginx.ingress.kubernetes.io/permanent-redirect-code: "301"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: tls-vnshop-cloud
+      hosts:
+        - {{ .Values.publicIngress.host }}
+  rules:
+    - host: {{ .Values.publicIngress.host }}
+      http:
+        paths:
+          - path: /ui
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: 4000
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
