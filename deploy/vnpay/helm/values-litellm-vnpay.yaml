@@ -216,6 +216,7 @@ proxy_config:
     # Mount: /etc/litellm/hooks/vnpay_routing_hook.py (xem volumes bên dưới)
     callbacks:
       - /etc/litellm/hooks/vnpay_routing_hook.vnpay_routing_hook
+      - otel # OpenTelemetry → Jaeger sdlc-go-prod:4317
 
 # ─── Resources ────────────────────────────────────────────────────────────────
 resources:
@@ -333,5 +334,11 @@ extraEnvVars:
     value: "INFO" # DEBUG → INFO: giảm CPU/IO đáng kể khi production
   - name: PYTHONPATH
     value: "/etc/litellm/hooks"
+  - name: OTEL_EXPORTER
+    value: "otlp_grpc"
+  - name: OTEL_ENDPOINT
+    value: "http://jaeger.sdlc-go-prod.svc.cluster.local:4317"
+  - name: OTEL_SERVICE_NAME
+    value: "litellm-gateway"
   - name: LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES
     value: "true" # Force chat/completions path cho openai provider — fix vnpay/minimax on-premise
