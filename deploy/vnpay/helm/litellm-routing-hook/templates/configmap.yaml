@@ -8,3 +8,5 @@ metadata:
 data:
   vnpay_routing_hook.py: |
 {{ .Files.Get "hook/vnpay_routing_hook.py" | indent 4 }}
+  vnpay_sso_handler.py: |
+{{ .Files.Get "hook/vnpay_sso_handler.py" | indent 4 }}

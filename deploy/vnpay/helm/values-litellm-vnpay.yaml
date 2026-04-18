@@ -34,7 +34,7 @@ db:
   deployStandalone: false
   endpoint: litellm-pgbouncer
   database: litellm
-  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?connection_limit=10&pool_timeout=30&connect_timeout=10&pgbouncer=true"
+  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?connection_limit=10&pool_timeout=30&connect_timeout=10"
   secret:
     name: litellm-postgres-credentials
     usernameKey: username
@@ -172,6 +172,8 @@ proxy_config:
   general_settings:
     master_key: os.environ/PROXY_MASTER_KEY
     store_model_in_db: true
+    # Google SSO via oauth2-proxy — đăng ký /vnpay-sso route tự động khi import
+    custom_sso: vnpay_sso_handler.vnpay_google_sso
     enable_content_filtering: false
     # Trust X-Forwarded-For header từ nginx ingress → ghi đúng client IP vào spend log
     use_x_forwarded_for: true
@@ -240,7 +242,7 @@ ingress:
     nginx.ingress.kubernetes.io/forwarded-for-header: "X-Forwarded-For"
     # ── Google SSO via oauth2-proxy ───────────────────────────────────────────
     nginx.ingress.kubernetes.io/auth-url: "http://litellm-oauth2-proxy.litellm.svc.cluster.local:4180/oauth2/auth"
-    nginx.ingress.kubernetes.io/auth-signin: "https://litellm.x.vnshop.cloud/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-signin: "https://litellm.x.vnshop.cloud/oauth2/start?rd=/vnpay-sso"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User"
     # Skip OAuth cho API calls (Bearer token) — LiteLLM tự xác thực bằng API key
     nginx.ingress.kubernetes.io/auth-snippet: |
@@ -307,6 +309,12 @@ volumes:
 volumeMounts:
   - name: routing-hook
     mountPath: /etc/litellm/hooks
+    readOnly: true
+  # custom_sso: get_instance_fn resolves relative to config dir /etc/litellm/
+  # nên cần mount file thẳng vào /etc/litellm/vnpay_sso_handler.py
+  - name: routing-hook
+    mountPath: /etc/litellm/vnpay_sso_handler.py
+    subPath: vnpay_sso_handler.py
     readOnly: true
   - name: moonshot-patch
     mountPath: /app/litellm/llms/moonshot/chat/transformation.py
