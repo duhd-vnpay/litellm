@@ -81,12 +81,26 @@ data:
           - labels:
               log_type:
 
-          # Extract HTTP method + path cho access logs
+          # Extract HTTP method + path + status cho access logs
+          # Uvicorn format: INFO:  10.x.x.x:port - "METHOD /path HTTP/1.1" STATUS STATUS_TEXT
           - regex:
-              expression: '"(?P<http_method>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) (?P<http_path>/[^\s?]*)'
+              expression: '"(?P<http_method>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) (?P<http_path>/[^\s?]*)[^"]*" (?P<http_status>\d{3})'
           - labels:
               http_method:
               http_path:
+              http_status:
+
+          # Classify status_class: 2xx | 3xx | 4xx | 5xx (cho nhanh filter)
+          - template:
+              source: status_class
+              template: >-
+                {{ if and (ge (atoi .http_status) 200) (lt (atoi .http_status) 300) }}2xx
+                {{- else if and (ge (atoi .http_status) 300) (lt (atoi .http_status) 400) }}3xx
+                {{- else if and (ge (atoi .http_status) 400) (lt (atoi .http_status) 500) }}4xx
+                {{- else if ge (atoi .http_status) 500 }}5xx
+                {{- else }}unknown{{ end }}
+          - labels:
+              status_class:
 
           # Classify endpoint_type từ path
           - template:
