@@ -10,7 +10,7 @@ VNPay-specific deployment, routing hook, và operational config cho LiteLLM Prox
                                         │                                             │
 Client (claude-cli, Copilot, etc.)      │  ┌─────────┐    ┌──────────┐                │
   │                                     │  │ LiteLLM │───▶│ PgBouncer│──▶ PostgreSQL  │
-  ▼                                     │  │ Pod ×2  │    │(tx pool) │   (StatefulSet)│
+  ▼                                     │  │ Pod ×2  │    │(session) │   (StatefulSet)│
 VNPayCloud WAF/CDN (600s)               │  │         │    └──────────┘    15Gi PVC    │
   │                                     │  │ Routing  │                                │
   ▼                                     │  │  Hook   │───▶ Redis (cache)              │
@@ -46,15 +46,16 @@ LiteLLM Proxy (600s)                    │  Tier 2: Kimi K2.5 ($0.60/$3 MTok)  
 ### Database Connection Chain
 
 ```
-LiteLLM Pod (Prisma, connection_limit=10, pool_timeout=30s, pgbouncer=true)
-  → PgBouncer (transaction pooling, max_client=200, pool_size=20, idle_timeout=600s)
+LiteLLM Pod (Prisma, connection_limit=10, pool_timeout=30s)
+  → PgBouncer (session pooling, max_client=200, pool_size=20, idle_timeout=600s)
     → PostgreSQL 16 (max_connections=100, idle_in_tx_timeout=5min, statement_timeout=5min)
 ```
 
 ## Stack
 
 - **LiteLLM Proxy** `v1.83.3-stable` (digest pinned) — multi-provider LLM gateway (2 replicas)
-- **Infrastructure**: PostgreSQL 16 (StatefulSet, 15Gi PVC), Redis 7 (Deployment), PgBouncer (Deployment), Nginx Ingress
+- **Infrastructure**: PostgreSQL 16 (StatefulSet, 15Gi PVC), Redis 7 (Deployment), PgBouncer session pooling (Deployment), Nginx Ingress
+- **Auth (UI)**: Google SSO via oauth2-proxy v7.7.1 — domain `@vnpay.vn`, nginx `auth_request`, `/vnpay-sso` auto-login endpoint
 - **Providers**: VNPAY GenAI on-premise (GLM-4, MiniMax M2.7), Kimi K2.5 (3 keys load-balanced), Claude Sonnet/Opus/Haiku 4.x, BGE-M3 embedding
 - **Access path**: Client → VNPayCloud WAF/CDN → CDN Edge → LB → Nginx Ingress → LiteLLM → Provider
 - **Cluster**: K8s on VNPayCloud (`sdlc-go-k8s-v2`)
@@ -74,14 +75,17 @@ deploy/vnpay/
 │   │       ├── stateful/
 │   │       │   └── postgresql.yaml
 │   │       └── ingress-public.yaml
-│   ├── litellm-routing-hook/           # Pre-call intelligent router (Python hook chart)
+│   ├── litellm-routing-hook/           # Pre-call intelligent router + SSO handler (Python hook chart)
 │   │   ├── Chart.yaml
 │   │   ├── values.yaml
 │   │   ├── hook/
-│   │   │   └── vnpay_routing_hook.py   # ← source code, edit here
+│   │   │   ├── vnpay_routing_hook.py   # ← routing hook source, edit here
+│   │   │   └── vnpay_sso_handler.py    # ← Google SSO /vnpay-sso endpoint
 │   │   └── templates/
 │   │       └── configmap.yaml          # Helm render via .Files.Get
 │   ├── values-litellm-vnpay.yaml       # Override values cho upstream LiteLLM helm chart
+│   ├── oauth2-proxy.yaml               # oauth2-proxy Deployment + Service (Google SSO)
+│   ├── ingress-oauth2-proxy.yaml       # Ingress cho /oauth2/* (không có auth-url)
 │   ├── litellm-health-cronjob.yaml     # CronJob: health check + 24h usage stats (*/5min)
 │   ├── litellm-post-upgrade-job.yaml   # Job: patch num_retries cho DB-stored models
 │   ├── rbac-litellm-readonly.yaml      # RBAC: read-only access cho ops team
@@ -120,9 +124,52 @@ bash helm/scripts/litellm-post-upgrade.sh
 ```bash
 kubectl create configmap litellm-routing-hook \
   --from-file=vnpay_routing_hook.py=helm/litellm-routing-hook/hook/vnpay_routing_hook.py \
+  --from-file=vnpay_sso_handler.py=helm/litellm-routing-hook/hook/vnpay_sso_handler.py \
   -n litellm --dry-run=client -o yaml | kubectl apply -f -
 kubectl rollout restart deployment litellm -n litellm
 ```
+
+## Google SSO (UI Only)
+
+UI tại `litellm.x.vnshop.cloud` yêu cầu đăng nhập Google `@vnpay.vn`. API tại `api-llm.x.vnshop.cloud` không bị ảnh hưởng.
+
+### Flow
+
+```
+Browser → litellm.x.vnshop.cloud
+  → Nginx auth_request → oauth2-proxy /oauth2/auth
+  → Chưa login → redirect /oauth2/start?rd=/vnpay-sso
+  → Google OAuth (vnpay.vn domain only)
+  → oauth2-proxy callback → set cookie
+  → redirect /vnpay-sso (nginx forward X-Auth-Request-Email header)
+  → LiteLLM tạo session key → redirect /ui/?token=<jwt>
+  → UI dashboard (không hỏi user/pass)
+```
+
+### Components
+
+| Component | File | Notes |
+|---|---|---|
+| `oauth2-proxy` | `oauth2-proxy.yaml` | Google provider, `--email-domain=vnpay.vn`, `--set-xauthrequest=true` |
+| `/oauth2/*` ingress | `ingress-oauth2-proxy.yaml` | Không có auth-url annotation — oauth2-proxy tự handle |
+| LiteLLM ingress | `values-litellm-vnpay.yaml` → `ingress.annotations` | `auth-url`, `auth-signin`, `auth-snippet` (Bearer bypass) |
+| SSO handler | `hook/vnpay_sso_handler.py` | Đăng ký `/vnpay-sso` route lên FastAPI, tạo LiteLLM session |
+
+### Bearer token bypass
+
+API calls với `Authorization: Bearer sk-xxx` bỏ qua OAuth hoàn toàn (nginx `auth-snippet`). Programmatic access từ `litellm.x.vnshop.cloud` vẫn hoạt động.
+
+### Secrets
+
+```bash
+# Tạo secret oauth2-proxy (Google Client ID/Secret + cookie secret)
+kubectl create secret generic litellm-oauth2-proxy-secret -n litellm \
+  --from-literal=OAUTH2_PROXY_CLIENT_ID="<google-client-id>" \
+  --from-literal=OAUTH2_PROXY_CLIENT_SECRET="<google-client-secret>" \
+  --from-literal=OAUTH2_PROXY_COOKIE_SECRET="<32-char-random-string>"
+```
+
+Cookie secret phải là chuỗi 16/24/32 ký tự (raw bytes, KHÔNG phải base64).
 
 ## Routing Hook
 
@@ -237,6 +284,8 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 | 2026-04-17 | Kimi output truncated (8K reasoning, 1 text) | Default max_tokens=8192 too low for reasoning model | Hook force max_tokens=16384 |
 | 2026-04-17 | WAF 504 timeout 50s | CDN Edge dynamic proxy hardcoded 50s | Escalated to VNPayCloud infra, increased to 600s |
 | 2026-04-18 | NetworkPolicy egress block Redis/DNS | Egress NP trên litellm namespace chặn toàn bộ egress (Redis, DNS, PgBouncer) | Chuyển sang Ingress NP trên sdlc-go-prod thay vì Egress NP trên litellm |
+| 2026-04-18 | vnpay_sso_handler ImportError | `get_instance_fn` resolve path relative to config dir (`/etc/litellm/`) nhưng file chỉ mount ở `/etc/litellm/hooks/` | Thêm subPath volumeMount tại `/etc/litellm/vnpay_sso_handler.py` |
+| 2026-04-18 | Prisma migrate advisory lock timeout | PgBouncer transaction mode không giữ session → `pg_advisory_lock` timeout mỗi restart | Chuyển PgBouncer sang session pooling mode |
 | 2026-03-24 | Supply chain compromise v1.82.7/v1.82.8 | TeamPCP credential stealer in upstream | Pin image digest, IOC scan trước upgrade |
 
 ## History
@@ -245,3 +294,4 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-15**: Gộp `litellm-vnpay` vào fork `github.com/duhd-vnpay/litellm` qua `git subtree add --prefix=deploy/vnpay`. Repo standalone đã archive read-only.
 - **2026-04-17**: Deploy PgBouncer, Kimi 3-key load balance, BGE-M3 embedding, SpendLogs retention 7d, timeout chain đồng bộ 600s.
 - **2026-04-18**: Pin image digest (IoC verify sau supply chain alert), OpenTelemetry → Jaeger sdlc-go-prod:4317.
+- **2026-04-18**: Google SSO cho UI `litellm.x.vnshop.cloud` — oauth2-proxy + `/vnpay-sso` auto-login endpoint, domain `@vnpay.vn`, API endpoint `api-llm.x.vnshop.cloud` không bị ảnh hưởng. Fix PgBouncer session mode (Prisma advisory lock compat).
