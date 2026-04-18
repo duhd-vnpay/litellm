@@ -278,6 +278,7 @@ Traffic flow: `Client (public IP) → VNPayCloud WAF/CDN → CDN Edge → LB (SN
 - **SpendLogs cleanup**: Built-in, `maximum_spend_logs_retention_period: 7d`, runs 03:00 UTC daily
 - **Nginx log format**: Includes `rt=` (request time), `uct=` (upstream connect time), `urt=` (upstream response time)
 - **Distributed tracing**: OpenTelemetry → Jaeger `sdlc-go-prod:4317` (service: `litellm-gateway`, OTLP gRPC)
+- **Log aggregation**: Promtail (DaemonSet trong `sdlc-go-prod`) scrape `/var/log/pods/litellm_*/*/*.log` → Loki. Labels: `level`, `log_type` (access/internal), `http_method`, `http_path`, `http_status`, `status_class` (2xx/3xx/4xx/5xx), `endpoint_type` (llm/health/admin/spend). Config managed bởi chart `sdlc-go` (`helm/sdlc-go/templates/deployments/promtail.yaml`) — **không phải bởi repo này**
 
 ### Useful commands
 
@@ -327,3 +328,4 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-18**: Pin image digest (IoC verify sau supply chain alert), OpenTelemetry → Jaeger sdlc-go-prod:4317.
 - **2026-04-18**: Google SSO cho UI `litellm.x.vnshop.cloud` — oauth2-proxy + `/vnpay-sso` auto-login endpoint, domain `@vnpay.vn`, API endpoint `api-llm.x.vnshop.cloud` không bị ảnh hưởng. Fix PgBouncer session mode (Prisma advisory lock compat).
 - **2026-04-18**: Thêm `/teleport-sso` endpoint (Teleport App Access via `Teleport-Jwt-Assertion` header), SSO handler preserve role từ DB thay vì hardcode `app_user`, JWT payload match `ReturnedUITokenObject` schema (`key` field), cookie-only handoff `/ui/?login=success`. Migration `user_id` UUID → email cho 13 UI-invited users (cascade FK + FK auto-update + 11.9K SpendLogs + `members_with_roles` JSON).
+- **2026-04-18**: Promtail extract thêm `http_status` + `status_class` cho LiteLLM access logs. Config chuyển về chart `sdlc-go` (owner duy nhất) — không còn duplicate trong repo này.
