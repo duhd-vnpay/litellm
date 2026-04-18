@@ -20,10 +20,11 @@ image:
   # Ref: https://docs.litellm.ai/blog/security-hardening-april-2026
   #
   # 2026-04-14: Upgrade v1.83.3.rc.1 → v1.83.3-stable (stable release of same version)
-  # Digest (amd64): sha256:f055956dead344aa630356cac22545bf6d22d8a3e0de445efe5b3bea998a9c73
+  # Digest verified 2026-04-18 via kubectl get pod -o jsonpath='{.status.containerStatuses[0].imageID}'
+  # Digest (amd64): sha256:1eb87774fb733a8c05301b9b52d9164ed4d96c499745a1a5258fba53c9a0d922
   repository: litellm/litellm-database
   pullPolicy: IfNotPresent
-  tag: "v1.83.3-stable"
+  tag: "v1.83.3-stable@sha256:1eb87774fb733a8c05301b9b52d9164ed4d96c499745a1a5258fba53c9a0d922"
 
 # ─── Database (via PgBouncer → PostgreSQL) ────────────────────────────────────
 # PgBouncer: transaction pooling, connection reuse, dead connection detection
