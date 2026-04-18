@@ -238,6 +238,15 @@ ingress:
     nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
     nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"
     nginx.ingress.kubernetes.io/forwarded-for-header: "X-Forwarded-For"
+    # ── Google SSO via oauth2-proxy ───────────────────────────────────────────
+    nginx.ingress.kubernetes.io/auth-url: "http://litellm-oauth2-proxy.litellm.svc.cluster.local:4180/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://litellm.x.vnshop.cloud/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User"
+    # Skip OAuth cho API calls (Bearer token) — LiteLLM tự xác thực bằng API key
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      if ($http_authorization ~* "^Bearer ") {
+        return 200;
+      }
   hosts:
     - host: litellm.x.vnshop.cloud
       paths:

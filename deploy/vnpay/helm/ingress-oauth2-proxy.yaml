@@ -1,0 +1,29 @@
+---
+# Ingress riêng cho oauth2-proxy callback + sign-in routes
+# Không có auth-url annotation — oauth2-proxy tự handle /oauth2/* paths
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm-oauth2-proxy
+  namespace: litellm
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+    nginx.ingress.kubernetes.io/compute-full-forwarded-for: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: litellm.x.vnshop.cloud
+      http:
+        paths:
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm-oauth2-proxy
+                port:
+                  number: 4180
+  tls:
+    - secretName: tls-vnshop-cloud
+      hosts:
+        - litellm.x.vnshop.cloud
