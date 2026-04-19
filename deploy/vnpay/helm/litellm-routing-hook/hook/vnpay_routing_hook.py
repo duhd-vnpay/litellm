@@ -25,8 +25,22 @@ logger = logging.getLogger("vnpay_routing_hook")
 
 # ── Custom model pricing (models chưa có trong LiteLLM built-in cost map) ────
 # Ref: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-# MiniMax-M2.7 chưa có trong upstream — dùng giá MiniMax-M2.5 ($0.30/$1.20 per MTok)
+# MiniMax-M2 / M2.7 chưa có trong upstream — dùng giá MiniMax-M2 ($0.30/$1.20 per MTok)
 _CUSTOM_MODEL_COST = {
+    "minimax/MiniMax-M2": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 40960,
+        "litellm_provider": "minimax",
+    },
+    "MiniMax-M2": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 40960,
+        "litellm_provider": "minimax",
+    },
     "minimax/MiniMax-M2.7": {
         "input_cost_per_token": 3e-07,
         "output_cost_per_token": 1.2e-06,
