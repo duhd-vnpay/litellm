@@ -256,8 +256,6 @@ class VNPayRoutingHook(CustomLogger):
     Được đăng ký qua litellm_settings.callbacks trong config.yaml.
     """
 
-    _pricing_injected = False
-
     async def async_pre_call_hook(
         self,
         user_api_key_dict,
@@ -265,12 +263,16 @@ class VNPayRoutingHook(CustomLogger):
         data: dict,
         call_type: str,
     ) -> dict:
-        # ── Lazy inject custom pricing (chạy 1 lần duy nhất) ─────────────
-        if not VNPayRoutingHook._pricing_injected:
-            for model, info in _CUSTOM_MODEL_COST.items():
-                litellm.model_cost[model] = info
-            VNPayRoutingHook._pricing_injected = True
-            logger.info(f"[pricing] registered {len(_CUSTOM_MODEL_COST)} custom models")
+        # ── Re-inject custom pricing nếu bị wipe ─────────────────────────
+        # LiteLLM có periodic `_check_and_reload_model_cost_map` (interval_hours
+        # config trong DB) — mỗi lần reload: `litellm.model_cost = new_map`,
+        # wipe entries ta set ở module import time. Check & re-inject mỗi request
+        # (rẻ: chỉ là dict lookup + gán; không re-inject nếu đã có đủ).
+        missing = [m for m in _CUSTOM_MODEL_COST if m not in litellm.model_cost]
+        if missing:
+            for model in missing:
+                litellm.model_cost[model] = _CUSTOM_MODEL_COST[model]
+            logger.info(f"[pricing] re-injected {len(missing)} custom models: {missing}")
 
         current_model = data.get("model", "")
 
