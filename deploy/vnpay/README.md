@@ -80,7 +80,9 @@ deploy/vnpay/
 │   │   ├── values.yaml
 │   │   ├── hook/
 │   │   │   ├── vnpay_routing_hook.py   # ← routing hook source, edit here
-│   │   │   └── vnpay_sso_handler.py    # ← Google SSO /vnpay-sso endpoint
+│   │   │   ├── vnpay_sso_handler.py    # ← Google SSO /vnpay-sso + Teleport /teleport-sso
+│   │   │   ├── vnpay_premium_unlock.py # ← set proxy_server.premium_user=True (unlock audit log, enterprise UI)
+│   │   │   └── vnpay_splunk_audit.py   # ← CustomLogger đẩy audit log → Splunk HEC
 │   │   └── templates/
 │   │       └── configmap.yaml          # Helm render via .Files.Get
 │   ├── values-litellm-vnpay.yaml       # Override values cho upstream LiteLLM helm chart
@@ -112,8 +114,11 @@ helm upgrade --install litellm-infra ./helm/litellm-infra -n litellm --create-na
 helm upgrade --install litellm-routing-hook ./helm/litellm-routing-hook -n litellm
 
 # 3. LiteLLM upstream chart với override values
-helm upgrade --install litellm oci://ghcr.io/berriai/litellm-helm \
-  -f helm/values-litellm-vnpay.yaml -n litellm --wait --timeout=300s
+# --take-ownership --force-conflicts: cần khi có drift với kubectl-set/annotate
+# hoặc kubectl-client-side-apply (xem incident 2026-04-20)
+helm upgrade --install litellm oci://ghcr.io/berriai/litellm-helm --version 1.82.3 \
+  -f helm/values-litellm-vnpay.yaml -n litellm \
+  --take-ownership --force-conflicts --wait --timeout=5m
 
 # 4. Post-upgrade job (apply num_retries cho DB models)
 bash helm/scripts/litellm-post-upgrade.sh
@@ -271,6 +276,52 @@ Traffic flow: `Client (public IP) → VNPayCloud WAF/CDN → CDN Edge → LB (SN
 - **Provider keys**: stored trong secret `litellm-provider-keys` (Anthropic, Kimi, MiniMax, VNPAY GenAI, Redis)
 - **DB credentials**: secret `litellm-postgres-credentials`
 
+### Audit Log
+
+LiteLLM ghi mọi thay đổi entity (team, user, key, model, MCP server, v.v.) vào bảng `LiteLLM_AuditLog`. Tính năng này bị license-gate trên OSS — VNPay bypass qua 2 hook:
+
+| Hook | File | Tác dụng |
+|---|---|---|
+| `vnpay_premium_unlock` | `hook/vnpay_premium_unlock.py` | Set `proxy_server.premium_user = True` lúc module load → backend gate ở [audit_logs.py:175](../../litellm/proxy/management_helpers/audit_logs.py#L175) và endpoint `/audit` (package `litellm_enterprise`) pass |
+| `vnpay_sso_handler` | `hook/vnpay_sso_handler.py` | JWT payload `premium_user: true` → UI unlock trang Audit Logs (UI gate client-side decode JWT cookie) |
+| `vnpay_splunk_audit` | `hook/vnpay_splunk_audit.py` | `CustomLogger.async_log_audit_log_event` đẩy `StandardAuditLogPayload` → Splunk HEC real-time |
+
+**Config** (xem `values-litellm-vnpay.yaml` → `litellm_settings`):
+
+```yaml
+litellm_settings:
+  store_audit_logs: true
+  audit_log_callbacks:
+    - vnpay_splunk_audit.vnpay_splunk_audit   # dotted module name, KHÔNG absolute path
+```
+
+Gotcha: handler `audit_log_callbacks` (proxy_server.py:3160) gọi `get_instance_fn` **không** truyền `config_file_path` → phải dùng dotted Python module name (PYTHONPATH=`/etc/litellm/hooks` đã wire sẵn). Dùng absolute path `/etc/litellm/hooks/xxx.xxx` sẽ crash pod với `ImportError`.
+
+**Splunk HEC secret** (tạo khi HEC ready):
+
+```bash
+kubectl create secret generic litellm-splunk-hec -n litellm \
+  --from-literal=SPLUNK_HEC_URL="https://splunk.vnpay.vn:8088/services/collector" \
+  --from-literal=SPLUNK_HEC_TOKEN="<hec-token-uuid>" \
+  --from-literal=SPLUNK_HEC_INDEX="litellm_audit" \
+  --from-literal=SPLUNK_HEC_VERIFY_TLS="true" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl rollout restart deployment/litellm -n litellm
+```
+
+Nếu secret thiếu URL/TOKEN, exporter tự disable (log WARNING, không break proxy).
+
+**Query bằng psql**:
+
+```bash
+kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c '
+  SELECT updated_at, changed_by, action, table_name, object_id
+  FROM "LiteLLM_AuditLog"
+  ORDER BY updated_at DESC LIMIT 20'
+```
+
+`table_name` thường gặp: `LiteLLM_TeamTable`, `LiteLLM_UserTable`, `LiteLLM_VerificationToken`, `LiteLLM_ProxyModelTable`, `LiteLLM_MCPServerTable`. `action`: `created | updated | deleted | rotated | regenerated | blocked | unblocked`.
+
 ### Health & Monitoring
 
 - **Health CronJob**: `litellm-health-check` — runs */5min, checks liveliness, readiness, PVC usage, 24h spend stats
@@ -319,6 +370,9 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 | 2026-04-18 | Mixed content warning khi redirect /ui | Redirect `/ui` (no slash) trigger StaticFiles 307 → `request.base_url` = HTTP internal → Location `http://...` khi page HTTPS | Redirect `/ui/?login=success` với trailing slash, skip auto-redirect |
 | 2026-04-18 | UI-invited users có user_id=UUID conflict với SSO user_id=email | Gây duplicate record/cô lập keys+spend khi user login SSO lần đầu | Migration: UPDATE PK + cascade FK cho 13 users (VerificationToken, SpendLogs 11.9K, DailyUserSpend, TeamTable.members_with_roles JSON) |
 | 2026-03-24 | Supply chain compromise v1.82.7/v1.82.8 | TeamPCP credential stealer in upstream | Pin image digest, IOC scan trước upgrade |
+| 2026-04-20 | Helm release `litellm` FAILED (rev 41) không upgrade được | Drift: `kubectl set env DATABASE_URL` + `kubectl annotate` các snippet Ingress → field manager conflict với helm (Apply) | Sync drift vào values (pgbouncer=true, Teleport JWT bypass), dùng `--take-ownership --force-conflicts` (Helm 3.18+) |
+| 2026-04-20 | UI Audit Logs hiện "Enterprise Feature" dù backend đã unlock | UI gate client-side decode JWT cookie → đọc field `premium_user`; SSO handler hardcode `False` | Đổi SSO JWT payload `premium_user: true` + logout/login lại |
+| 2026-04-20 | `audit_log_callbacks` pod crash `ImportError` | Handler (proxy_server.py:3160) không truyền `config_file_path` cho `get_instance_fn` → absolute path `/etc/litellm/hooks/...` không import được | Dùng dotted module name (`vnpay_splunk_audit.vnpay_splunk_audit`), PYTHONPATH đã trỏ `/etc/litellm/hooks` |
 
 ## History
 
@@ -329,3 +383,4 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-18**: Google SSO cho UI `litellm.x.vnshop.cloud` — oauth2-proxy + `/vnpay-sso` auto-login endpoint, domain `@vnpay.vn`, API endpoint `api-llm.x.vnshop.cloud` không bị ảnh hưởng. Fix PgBouncer session mode (Prisma advisory lock compat).
 - **2026-04-18**: Thêm `/teleport-sso` endpoint (Teleport App Access via `Teleport-Jwt-Assertion` header), SSO handler preserve role từ DB thay vì hardcode `app_user`, JWT payload match `ReturnedUITokenObject` schema (`key` field), cookie-only handoff `/ui/?login=success`. Migration `user_id` UUID → email cho 13 UI-invited users (cascade FK + FK auto-update + 11.9K SpendLogs + `members_with_roles` JSON).
 - **2026-04-18**: Promtail extract thêm `http_status` + `status_class` cho LiteLLM access logs. Config chuyển về chart `sdlc-go` (owner duy nhất) — không còn duplicate trong repo này.
+- **2026-04-20**: Unlock Audit Log trên OSS — `vnpay_premium_unlock` override `proxy_server.premium_user=True` (backend), SSO JWT `premium_user: true` (UI). Thêm `vnpay_splunk_audit` `CustomLogger` push audit log → Splunk HEC real-time (self-disable khi secret `litellm-splunk-hec` chưa cấu hình). Sync 2 drift trong values file: `db.url` thêm `pgbouncer=true` (Prisma simple protocol), `auth-snippet` thêm bypass OAuth cho Teleport JWT. Helm upgrade dùng `--take-ownership --force-conflicts` để dẹp conflict với `kubectl-set`/`kubectl-annotate`/`kubectl-client-side-apply`.
