@@ -249,6 +249,26 @@ ingress:
       if ($http_authorization ~* "^Bearer ") {
         return 200;
       }
+    # ── SSO handoff routing ───────────────────────────────────────────────────
+    # `auth-signin?rd=/vnpay-sso` chỉ trigger khi oauth2-proxy auth FAIL (first login).
+    # User đã có cookie _oauth2_proxy từ app khác (*.x.vnshop.cloud) sẽ bypass
+    # /vnpay-sso handler → không tạo LiteLLM user → stuck tại /ui/login/.
+    # Các rule dưới đây đảm bảo mọi request thiếu LiteLLM session cookie (`token`)
+    # đều được redirect tới /teleport-sso (nếu qua Teleport) hoặc /vnpay-sso (fallback).
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      # Teleport App Access: JWT header + root path → /teleport-sso
+      if ($http_teleport_jwt_assertion) { set $do_teleport 1; }
+      if ($request_uri = /)             { set $do_teleport "${do_teleport}1"; }
+      if ($do_teleport = "11")          { return 302 /teleport-sso; }
+
+      # UI handoff: user vào /ui/* mà chưa có cookie 'token' (LiteLLM session).
+      # Cookie được set bởi /vnpay-sso | /teleport-sso handler sau khi tạo user.
+      # Teleport-first (nếu có JWT), fallback oauth2-proxy /vnpay-sso.
+      if ($http_teleport_jwt_assertion) { set $handoff_target /teleport-sso; }
+      if ($handoff_target = "")         { set $handoff_target /vnpay-sso; }
+      if ($cookie_token = "")           { set $do_handoff 1; }
+      if ($uri ~ ^/ui(/.*)?$)           { set $do_handoff "${do_handoff}1"; }
+      if ($do_handoff = "11")           { return 302 $handoff_target; }
   hosts:
     - host: litellm.x.vnshop.cloud
       paths:
