@@ -92,7 +92,11 @@ async def _make_ui_session(email: str) -> str:
             "user_email": email,
             "user_role": user_role,
             "login_method": "sso",
-            "premium_user": False,
+            # UI decode JWT cookie để gate Audit Logs / Enterprise pages qua
+            # field này. Phải True để khớp với backend override trong
+            # vnpay_premium_unlock.py (set proxy_server.premium_user=True).
+            # Nếu False → UI hiện "Enterprise Feature" banner dù backend mở.
+            "premium_user": True,
             "auth_header_name": "Authorization",
             "disabled_non_admin_personal_key_creation": False,
             "server_root_path": "",

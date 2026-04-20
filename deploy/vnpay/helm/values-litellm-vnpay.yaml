@@ -34,7 +34,9 @@ db:
   deployStandalone: false
   endpoint: litellm-pgbouncer
   database: litellm
-  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?connection_limit=10&pool_timeout=30&connect_timeout=10"
+  # `pgbouncer=true` → Prisma dùng simple protocol (no server-side prepared
+  # statements), an toàn khi PgBouncer transaction/session mode.
+  url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?connection_limit=10&pool_timeout=30&connect_timeout=10&pgbouncer=true"
   secret:
     name: litellm-postgres-credentials
     usernameKey: username
@@ -51,6 +53,7 @@ masterkeySecretKey: PROXY_MASTER_KEY
 environmentSecrets:
   - litellm-provider-keys
   - litellm-master-key
+  - litellm-splunk-hec # SPLUNK_HEC_URL, SPLUNK_HEC_TOKEN (+ tuỳ chọn SPLUNK_HEC_INDEX, SPLUNK_HEC_VERIFY_TLS)
 
 # ─── Proxy Config ─────────────────────────────────────────────────────────────
 proxy_config:
@@ -212,11 +215,26 @@ proxy_config:
       host: litellm-redis
       port: 6379
       password: os.environ/REDIS_PASSWORD
+    # ── Audit log (OSS license-gated, unlock qua vnpay_premium_unlock) ────────
+    # LiteLLM_AuditLog table ghi thay đổi team/key/user/model. `store_audit_logs`
+    # bật dispatcher; `vnpay_premium_unlock` callback set premium_user=True để
+    # bypass gate ở audit_logs.py:175.
+    store_audit_logs: true
+    # audit_log_callbacks nhận StandardAuditLogPayload → forward tới hệ ngoài.
+    # vnpay_splunk_audit đọc SPLUNK_HEC_URL/TOKEN từ secret litellm-splunk-hec,
+    # self-disable nếu secret chưa tạo (log WARNING, không break proxy).
+    # LƯU Ý: audit_log_callbacks handler (proxy_server.py:3160) KHÔNG truyền
+    # config_file_path cho get_instance_fn → phải dùng dotted Python module
+    # name (không phải absolute path). PYTHONPATH=/etc/litellm/hooks nên
+    # `vnpay_splunk_audit` import được qua importlib.import_module.
+    audit_log_callbacks:
+      - vnpay_splunk_audit.vnpay_splunk_audit
     # ── Pre-call routing hook ─────────────────────────────────────────────────
     # Custom model pricing (MiniMax-M2.7, openai/v_minimax, openai/v_glm46) được
     # inject vào litellm.model_cost qua vnpay_routing_hook.py (lazy init)
     # Mount: /etc/litellm/hooks/vnpay_routing_hook.py (xem volumes bên dưới)
     callbacks:
+      - /etc/litellm/hooks/vnpay_premium_unlock.vnpay_premium_unlock # Unlock OSS license gates (audit log, v.v.)
       - /etc/litellm/hooks/vnpay_routing_hook.vnpay_routing_hook
       - otel # OpenTelemetry → Jaeger sdlc-go-prod:4317
 
@@ -244,9 +262,14 @@ ingress:
     nginx.ingress.kubernetes.io/auth-url: "http://litellm-oauth2-proxy.litellm.svc.cluster.local:4180/oauth2/auth"
     nginx.ingress.kubernetes.io/auth-signin: "https://litellm.x.vnshop.cloud/oauth2/start?rd=/vnpay-sso"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User"
-    # Skip OAuth cho API calls (Bearer token) — LiteLLM tự xác thực bằng API key
+    # Skip OAuth cho:
+    #   - API calls (Bearer token) — LiteLLM tự xác thực bằng API key
+    #   - Teleport App Access — JWT assertion header, Teleport đã authenticate user
     nginx.ingress.kubernetes.io/auth-snippet: |
       if ($http_authorization ~* "^Bearer ") {
+        return 200;
+      }
+      if ($http_teleport_jwt_assertion) {
         return 200;
       }
     # ── SSO handoff routing ───────────────────────────────────────────────────

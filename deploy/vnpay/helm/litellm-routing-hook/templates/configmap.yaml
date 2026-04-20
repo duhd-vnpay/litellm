@@ -10,3 +10,7 @@ data:
 {{ .Files.Get "hook/vnpay_routing_hook.py" | indent 4 }}
   vnpay_sso_handler.py: |
 {{ .Files.Get "hook/vnpay_sso_handler.py" | indent 4 }}
+  vnpay_premium_unlock.py: |
+{{ .Files.Get "hook/vnpay_premium_unlock.py" | indent 4 }}
+  vnpay_splunk_audit.py: |
+{{ .Files.Get "hook/vnpay_splunk_audit.py" | indent 4 }}
