@@ -84,6 +84,39 @@ _CUSTOM_MODEL_COST = {
         "litellm_provider": "openai",
         "mode": "embedding",
     },
+    # Kimi K2.6 — reasoning model, bật thinking default.
+    # `supports_reasoning: True` là BẮT BUỘC để LiteLLM moonshot transformation
+    # gọi `fill_reasoning_content()` — tự inject `reasoning_content: " "` vào
+    # assistant tool_call messages thiếu field (Claude Code / Anthropic SDK
+    # không round-trip `thinking` blocks sang OpenAI format). Không có flag
+    # này: Moonshot API reject 400 "thinking is enabled but reasoning_content
+    # is missing". Ref: https://platform.kimi.ai/docs/pricing/chat-k26
+    "moonshot/kimi-k2.6": {
+        "input_cost_per_token": 9.5e-07,
+        "output_cost_per_token": 4e-06,
+        "cache_read_input_token_cost": 1.6e-07,
+        "max_input_tokens": 262144,
+        "max_output_tokens": 16384,
+        "litellm_provider": "moonshot",
+        "mode": "chat",
+        "supports_reasoning": True,
+        "supports_function_calling": True,
+        "supports_tool_choice": True,
+        "supports_prompt_caching": True,
+    },
+    "kimi-k2.6": {
+        "input_cost_per_token": 9.5e-07,
+        "output_cost_per_token": 4e-06,
+        "cache_read_input_token_cost": 1.6e-07,
+        "max_input_tokens": 262144,
+        "max_output_tokens": 16384,
+        "litellm_provider": "moonshot",
+        "mode": "chat",
+        "supports_reasoning": True,
+        "supports_function_calling": True,
+        "supports_tool_choice": True,
+        "supports_prompt_caching": True,
+    },
 }
 for _model, _info in _CUSTOM_MODEL_COST.items():
     litellm.model_cost[_model] = _info
