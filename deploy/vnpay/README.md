@@ -282,7 +282,7 @@ LiteLLM ghi mọi thay đổi entity (team, user, key, model, MCP server, v.v.) 
 
 | Hook | File | Tác dụng |
 |---|---|---|
-| `vnpay_premium_unlock` | `hook/vnpay_premium_unlock.py` | Set `proxy_server.premium_user = True` lúc module load → backend gate ở [audit_logs.py:175](../../litellm/proxy/management_helpers/audit_logs.py#L175) và endpoint `/audit` (package `litellm_enterprise`) pass |
+| `vnpay_premium_unlock` | `hook/vnpay_premium_unlock.py` | (1) Set `proxy_server.premium_user = True` → backend gate ở [audit_logs.py:175](../../litellm/proxy/management_helpers/audit_logs.py#L175) và endpoint `/audit` (package `litellm_enterprise`) pass. (2) Monkey patch `_authorize_and_filter_teams` → proxy_admin với `user_id=self` query (kiểu UI luôn gọi) trả tất cả teams thay vì filter by membership → dropdown Teams trong dialog Policy Attachment hiện đủ |
 | `vnpay_sso_handler` | `hook/vnpay_sso_handler.py` | JWT payload `premium_user: true` → UI unlock trang Audit Logs (UI gate client-side decode JWT cookie) |
 | `vnpay_splunk_audit` | `hook/vnpay_splunk_audit.py` | `CustomLogger.async_log_audit_log_event` đẩy `StandardAuditLogPayload` → Splunk HEC real-time |
 
@@ -373,6 +373,7 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 | 2026-04-20 | Helm release `litellm` FAILED (rev 41) không upgrade được | Drift: `kubectl set env DATABASE_URL` + `kubectl annotate` các snippet Ingress → field manager conflict với helm (Apply) | Sync drift vào values (pgbouncer=true, Teleport JWT bypass), dùng `--take-ownership --force-conflicts` (Helm 3.18+) |
 | 2026-04-20 | UI Audit Logs hiện "Enterprise Feature" dù backend đã unlock | UI gate client-side decode JWT cookie → đọc field `premium_user`; SSO handler hardcode `False` | Đổi SSO JWT payload `premium_user: true` + logout/login lại |
 | 2026-04-20 | `audit_log_callbacks` pod crash `ImportError` | Handler (proxy_server.py:3160) không truyền `config_file_path` cho `get_instance_fn` → absolute path `/etc/litellm/hooks/...` không import được | Dùng dotted module name (`vnpay_splunk_audit.vnpay_splunk_audit`), PYTHONPATH đã trỏ `/etc/litellm/hooks` |
+| 2026-04-21 | UI dialog Policy Attachment dropdown Teams rỗng dù admin có 12 teams | `_authorize_and_filter_teams` (team_endpoints.py:3645) filter by membership bất kể role khi `user_id` được truyền. UI `teamListCall` luôn truyền userId → admin thuộc 0 team thì rỗng | Monkey patch trong `vnpay_premium_unlock`: proxy_admin → trả all teams, bypass user_id filter |
 
 ## History
 
@@ -384,3 +385,4 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-18**: Thêm `/teleport-sso` endpoint (Teleport App Access via `Teleport-Jwt-Assertion` header), SSO handler preserve role từ DB thay vì hardcode `app_user`, JWT payload match `ReturnedUITokenObject` schema (`key` field), cookie-only handoff `/ui/?login=success`. Migration `user_id` UUID → email cho 13 UI-invited users (cascade FK + FK auto-update + 11.9K SpendLogs + `members_with_roles` JSON).
 - **2026-04-18**: Promtail extract thêm `http_status` + `status_class` cho LiteLLM access logs. Config chuyển về chart `sdlc-go` (owner duy nhất) — không còn duplicate trong repo này.
 - **2026-04-20**: Unlock Audit Log trên OSS — `vnpay_premium_unlock` override `proxy_server.premium_user=True` (backend), SSO JWT `premium_user: true` (UI). Thêm `vnpay_splunk_audit` `CustomLogger` push audit log → Splunk HEC real-time (self-disable khi secret `litellm-splunk-hec` chưa cấu hình). Sync 2 drift trong values file: `db.url` thêm `pgbouncer=true` (Prisma simple protocol), `auth-snippet` thêm bypass OAuth cho Teleport JWT. Helm upgrade dùng `--take-ownership --force-conflicts` để dẹp conflict với `kubectl-set`/`kubectl-annotate`/`kubectl-client-side-apply`.
+- **2026-04-21**: Mở rộng `vnpay_premium_unlock` thành "landing pad" cho module-level monkey patch OSS gaps. Thêm patch `_authorize_and_filter_teams` → proxy_admin với `user_id=self` (kiểu UI luôn gọi) trả all teams thay vì filter membership → dropdown Teams trong dialog Policy Attachment hiện đủ 12 teams.
