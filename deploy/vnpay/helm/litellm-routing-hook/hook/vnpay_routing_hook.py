@@ -296,16 +296,17 @@ class VNPayRoutingHook(CustomLogger):
         data: dict,
         call_type: str,
     ) -> dict:
-        # ── Re-inject custom pricing nếu bị wipe ─────────────────────────
-        # LiteLLM có periodic `_check_and_reload_model_cost_map` (interval_hours
-        # config trong DB) — mỗi lần reload: `litellm.model_cost = new_map`,
-        # wipe entries ta set ở module import time. Check & re-inject mỗi request
-        # (rẻ: chỉ là dict lookup + gán; không re-inject nếu đã có đủ).
-        missing = [m for m in _CUSTOM_MODEL_COST if m not in litellm.model_cost]
-        if missing:
-            for model in missing:
-                litellm.model_cost[model] = _CUSTOM_MODEL_COST[model]
-            logger.info(f"[pricing] re-injected {len(missing)} custom models: {missing}")
+        # ── Force-override custom pricing mỗi request ────────────────────
+        # Hai nguồn có thể wipe/đè entries ta set ở module import time:
+        #   1) `_check_and_reload_model_cost_map` định kỳ (config interval_hours
+        #      trong DB) → `litellm.model_cost = new_map`, wipe toàn bộ.
+        #   2) Proxy sync `LiteLLM_ProxyModelTable` → nếu litellm_params có
+        #      input_cost_per_token=0 (default khi thêm model qua UI mà không
+        #      điền cost), sẽ ghi đè entry của ta bằng 0 → cost tracking hỏng.
+        # Giải pháp: force-set mỗi pre_call (idempotent, ~nanoseconds). Source
+        # of truth là _CUSTOM_MODEL_COST trong file này, không phải DB.
+        for model, info in _CUSTOM_MODEL_COST.items():
+            litellm.model_cost[model] = info
 
         current_model = data.get("model", "")
 
