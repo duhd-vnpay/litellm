@@ -8,6 +8,19 @@
 replicaCount: 2
 # numWorkers: 2
 
+# ─── Autoscaling ──────────────────────────────────────────────────────────────
+# HPA CPU-based (metrics-server sẵn có trong cluster, không cần Prometheus).
+# Khi enabled: chart deployment.yaml bỏ qua .spec.replicas, HPA manage replicas.
+# LLM proxy chủ yếu I/O-bound (chờ upstream) → CPU chưa phải signal tốt nhất,
+# nhưng đủ để scale out khi có traffic burst. Upgrade lên KEDA + Prometheus
+# (request-rate trigger) khi traffic ổn định ở mức cao hơn.
+autoscaling:
+  enabled: true
+  minReplicas: 2 # HA floor — không scale dưới 2 pod
+  maxReplicas: 6 # Cap — 6 pod × 1 CPU request = 6 CPU max, tránh runaway
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80  # Bật nếu mem pressure là bottleneck
+
 image:
   # SECURITY: Pin to exact digest, NOT mutable tags like main-stable/main-latest
   # Supply chain incident 2026-03-24: v1.82.7/v1.82.8 compromised by TeamPCP (credential stealer)
