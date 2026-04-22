@@ -83,45 +83,21 @@ async def _lookup_user_primary_team(email: str) -> str:
     return "litellm-dashboard"
 
 
-async def _find_reusable_sso_key(email: str, team_id: str) -> str:
-    """Return token của SSO key còn active (expires > 1h nữa) + cùng team_id.
-
-    Ngưỡng 1h: nếu key sắp hết hạn (<1h) thì tạo mới để user có đủ thời gian
-    làm việc thay vì bị kick ra giữa chừng. Điều kiện team_id khớp để đảm bảo
-    user vừa được admin re-assign team sẽ nhận key mới với team đúng.
-
-    Trả "" nếu không có key phù hợp → caller tạo mới.
-    """
-    try:
-        from datetime import datetime, timedelta, timezone
-        from litellm.proxy.proxy_server import prisma_client
-        if prisma_client is None:
-            return ""
-        min_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-        existing = await prisma_client.db.litellm_verificationtoken.find_first(
-            where={
-                "user_id": email,
-                "key_alias": f"UI SSO: {email}",
-                "team_id": team_id,
-                "expires": {"gt": min_expiry},
-            },
-            order={"created_at": "desc"},
-        )
-        if existing and getattr(existing, "token", None):
-            return existing.token
-    except Exception as exc:
-        _logger.warning("reusable key lookup failed for %s: %s", email, exc)
-    return ""
-
-
 async def _make_ui_session(email: str) -> str:
-    """Tạo (hoặc reuse) LiteLLM key + JWT cho UI session. Return jwt_token.
+    """Tạo LiteLLM key + JWT cho UI session. Return jwt_token string.
 
-    Reuse logic (2026-04-22): nếu user đã có active SSO key (expires >1h nữa)
-    với đúng team_id hiện tại → reuse token cũ thay vì tạo key mới. Tránh
-    phình VerificationToken table (trước đây mỗi login = 1 key, vuna có 200+
-    keys/ngày). Key mới chỉ được tạo khi session thực sự hết hạn hoặc user
-    được admin assign sang team khác.
+    Reuse active key KHÔNG KHẢ THI với LiteLLM architecture:
+    - `generate_key_helper_fn` trả về `key_data["token"]` = raw `sk-xxx`
+      (dùng làm Bearer) ngay lần tạo đầu, nhưng DB lưu dạng HASH
+      (`LiteLLM_VerificationToken.token` column là hash). Hash one-way
+      → không thể restore raw `sk-xxx` từ DB để reuse ở login sau.
+    - Backend `user_api_key_auth` hash Bearer input → match với DB hash
+      column. Gửi hash trực tiếp → mismatch → 401.
+
+    Phương án quản lý bloat:
+    1. `litellm-sso-key-cleanup` CronJob 03:00 UTC — xoá expired keys
+    2. 8h TTL mặc định — key tự dọn sau 1 ngày làm việc
+    3. UI session duration ngắn (nếu cần giảm bloat hơn nữa, hạ xuống 2-4h)
     """
     import litellm
     import jwt as pyjwt
@@ -133,33 +109,27 @@ async def _make_ui_session(email: str) -> str:
     user_role = await _lookup_user_role(email)
     team_id = await _lookup_user_primary_team(email)
 
-    token = await _find_reusable_sso_key(email, team_id)
-    if token:
-        _logger.info("SSO: reusing active key for %s (team=%s)", email, team_id)
-    else:
-        key_data = await generate_key_helper_fn(
-            request_type="user",
-            duration=LITELLM_UI_SESSION_DURATION,
-            models=[],
-            aliases={},
-            config={},
-            spend=0,
-            user_id=email,
-            user_email=email,
-            user_role=user_role,
-            team_id=team_id,
-            max_budget=litellm.max_ui_session_budget,
-            key_alias=f"UI SSO: {email}",
-        )
-        token = key_data.get("token", "")
-        _logger.info("SSO: created new key for %s (team=%s)", email, team_id)
+    key_data = await generate_key_helper_fn(
+        request_type="user",
+        duration=LITELLM_UI_SESSION_DURATION,
+        models=[],
+        aliases={},
+        config={},
+        spend=0,
+        user_id=email,
+        user_email=email,
+        user_role=user_role,
+        team_id=team_id,
+        max_budget=litellm.max_ui_session_budget,
+        key_alias=f"UI SSO: {email}",
+    )
 
     # Field names MUST match litellm.types.proxy.ui_sso.ReturnedUITokenObject
     # (key not id — backend auth reads jwt["key"] to look up the API token)
     return pyjwt.encode(
         {
             "user_id": email,
-            "key": token,
+            "key": key_data.get("token", ""),
             "user_email": email,
             "user_role": user_role,
             "login_method": "sso",
