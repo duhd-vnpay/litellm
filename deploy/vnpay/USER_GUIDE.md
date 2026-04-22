@@ -1,6 +1,6 @@
 # LiteLLM VNPay — User Guide
 
-Hướng dẫn end-user sử dụng LiteLLM Gateway VNPay: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
+Hướng dẫn end-user sử dụng LLM Gateway VNPVNPAYay: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
 
 - **UI Dashboard**: https://litellm.x.vnshop.cloud (Teleport SSO / Google SSO `@vnpay.vn`)
 - **API endpoint**: https://api-llm.x.vnshop.cloud
@@ -36,8 +36,8 @@ Hướng dẫn end-user sử dụng LiteLLM Gateway VNPay: đăng nhập, tạo 
 | `claude-opus-4-6` | Anthropic Claude Opus 4.6 | 200K | $15 / $75 | Deep reasoning, complex tasks |
 | `claude-opus-4-5` | Anthropic Claude Opus 4.5 | 200K | $15 / $75 | Deep reasoning |
 | `claude-haiku-4-5` | Anthropic Claude Haiku 4.5 | 200K | $1 / $5 | Fast, cheap, small-fast-model |
-| `moonshot/kimi-k2.6` | Moonshot Kimi K2.6 | 262K | $0.95 / $4 (cache hit $0.16) | Coding/agent, thinking mode |
-| `moonshot/kimi-k2.5` | Moonshot Kimi K2.5 | 262K | $0.60 / $3 | Coding/analysis |
+| `moonshot/kimi-k2.6` | Moonshot Kimi K2.6 (MoE 1T / 32B active) | 256K | $0.95 / $4 (cache hit $0.16) | **Top open-weights** cho agent/coding — Intelligence Index 54 (rank #4, sau Anthropic/Google/OpenAI). Tool use 96% τ²-Bench, hallucination 39% (gần Claude Opus). Thinking mode default |
+| `moonshot/kimi-k2.5` | Moonshot Kimi K2.5 | 262K | $0.60 / $3 | Coding/analysis tầm trung, hallucination cao hơn K2.6 |
 | `MiniMax-M2.7` | MiniMax M2 cloud | 1M | $0.30 / $1.20 | Cheap long-context, reasoning |
 | `vnpay/minimax` | VNPAY GenAI MiniMax on-premise | 131K | **$0** (free) | Dữ liệu nhạy cảm, zero egress |
 | `vnpay/v_glm46` | VNPAY GenAI GLM-4 on-premise | 128K | **$0** (free) | Dữ liệu nhạy cảm |
@@ -46,6 +46,17 @@ Hướng dẫn end-user sử dụng LiteLLM Gateway VNPay: đăng nhập, tạo 
 | `vnpay-medium` | Alias → `moonshot/kimi-k2.5` | 262K | $0.60 / $3 | Coding mức trung bình |
 | `vnpay-smart-routing` | Alias routing tự động | — | varies | Hook tự chọn tier 0/1/2/3 theo prompt |
 | `text-embedding-3-small` | BGE-M3 on-premise | 8K | $0 | Embedding 1024 dims, multilingual |
+
+### Chọn model theo tác vụ (quick guide)
+
+- **Agent + coding phức tạp / multi-step** → `moonshot/kimi-k2.6` (rẻ hơn Claude ~3x, agentic gần tương đương frontier) hoặc `claude-sonnet-4-6`
+- **Deep reasoning / architecture design** → `claude-opus-4-6` (đắt nhưng không có đối thủ open-weights ngang hàng)
+- **Edit đơn giản / format / tóm tắt** → `claude-haiku-4-5` hoặc `vnpay-simple` ($0)
+- **Long-context (>256K) rẻ** → `MiniMax-M2.7` (1M ctx, $0.30/$1.20)
+- **Dữ liệu nhạy cảm / PII** → `vnpay-sensitive` / `vnpay/minimax` (on-premise, $0, zero egress)
+- **Không biết chọn gì** → `vnpay-smart-routing` (hook tự phân tier 0/1/2/3 dựa keyword prompt)
+
+**Benchmark Kimi K2.6** ([Artificial Analysis review](https://artificialanalysis.ai/articles/kimi-k2-6-the-new-leading-open-weights-model)): MoE 1T / 32B active params, Intelligence Index 54 (rank #4 overall, sau Anthropic/Google/OpenAI ở 57). Agentic GDPval-AA Elo 1520 (từ K2.5's 1309 → cải thiện mạnh). Tool use 96% τ²-Bench Telecom. Hallucination rate 39% (giảm từ 65% ở K2.5, gần Claude Opus 4.7's 36%). Reasoning tokens / full eval ~160M (Claude Sonnet 4.6: ~190M, GPT 5.4: ~110M). Hỗ trợ multimodal (image + video input).
 
 > **Lưu ý quan trọng về dữ liệu nhạy cảm**: Mọi prompt chứa PII (CMND, OTP, số thẻ, thông tin khách hàng thực) **phải** dùng `vnpay-sensitive` / `vnpay/v_glm46` / `vnpay/minimax` — chạy on-premise, zero egress. Routing hook cũng tự động redirect sang on-premise khi phát hiện PII keyword.
 
@@ -61,9 +72,9 @@ Virtual key là API key cá nhân gắn với user/team — dùng cho mọi tool
 2. Sidebar trái → **Virtual Keys**
 3. Click **+ Create New Key**
 4. Điền:
-   - **Key Alias**: tên gợi nhớ, ví dụ `claude-code-laptop-duhd`
+   - **Key Alias**: tên gợi nhớ, ví dụ `dungntt-pc`
    - **Team**: chọn team của bạn (nếu có — budget tính theo team)
-   - **Models**: tick models được phép (hoặc `all-proxy-models` cho full access)
+   - **Models**: tick models được phép (hoặc `all-team-models` cho full access)
    - **Max Budget**: limit USD/key (khuyến nghị $20-50/key, tránh runaway)
    - **Budget Duration**: `monthly` / `weekly` / `daily` / `no-reset`
    - **TPM/RPM limits**: optional — cap rate limit
@@ -274,24 +285,31 @@ Cline hỗ trợ 2 cách kết nối LiteLLM gateway:
 
 ### 6.5 Xcode 26+ (macOS)
 
-Xcode 26 hỗ trợ **Coding Intelligence với custom LLM provider** qua giao diện built-in.
+Yêu cầu: **Xcode 26 trở lên** (macOS Tahoe). Tham khảo chi tiết + troubleshooting: [docs/xcode-intelligence-setup.md](./docs/xcode-intelligence-setup.md).
 
-1. **Xcode > Settings > Intelligence** (hoặc `⌘,`)
-2. Tab **Model Providers** → click **+** → chọn **Custom Provider**
-3. Điền:
-   - **Provider Name**: `LiteLLM VNPay`
-   - **Host URL**: `https://api-llm.x.vnshop.cloud`
-   - **API Path**: `/v1/chat/completions`
-   - **API Key**: virtual key (`sk-...`)
-   - **Model Names** (thêm từng dòng):
-     - `claude-sonnet-4-6`
-     - `claude-opus-4-6`
-     - `moonshot/kimi-k2.5`
-     - `vnpay/minimax`
-4. Click **Verify** → Xcode test connection
-5. Tab **Default Models** → chọn `LiteLLM VNPay` làm provider mặc định
+**Quy trình:**
 
-Sau đó: trong Xcode editor, dùng menu **Editor > Coding Intelligence** hoặc phím tắt.
+1. **Xcode > Settings** (`⌘,`) → sidebar trái chọn **Intelligence**
+2. Mục **Providers** → click **Add a Provider** → chọn **Internet Hosted**
+3. Điền form:
+
+   | Trường | Giá trị |
+   |---|---|
+   | **URL** | `https://api-llm.x.vnshop.cloud` |
+   | **API Key Header** | `Authorization` |
+   | **API Key** | `Bearer sk-your-virtual-key` |
+   | **Description** | `VNPay AI Gateway` |
+
+4. Click **Add** — Xcode gọi ngay `GET /v1/models` để verify. Nếu OK → provider hiện trong list.
+5. Chọn model làm default (`Editor > Coding Intelligence > <model>` hoặc phím tắt `⌘+0`).
+
+**Chú ý quan trọng** (tránh lỗi "Provider is not valid"):
+- **URL KHÔNG có `/v1`** — Xcode tự append `/v1/models`, `/v1/chat/completions`.
+- **API Key field phải có tiền tố `Bearer `** (có khoảng trắng) — Xcode không tự thêm.
+- Test trước bằng curl nếu verify fail:
+  ```bash
+  curl https://api-llm.x.vnshop.cloud/v1/models -H "Authorization: Bearer sk-..."
+  ```
 
 ### 6.6 Android Studio
 
@@ -507,6 +525,6 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 
 ## Liên hệ
 
-- Vấn đề gateway / model / quota: `#litellm-support` Slack
-- Bug UI / feature request: tạo ticket Jira project `GENAI`
-- Security incident: escalation sang DevOps on-call
+- Vấn đề gateway / model / quota: `duhd` Viber
+- Bug UI / feature request: tạo ticket Jira project `litellm`
+- Security incident: escalation sang `duhd` Viber
