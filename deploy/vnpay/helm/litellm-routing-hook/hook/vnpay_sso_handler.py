@@ -16,11 +16,22 @@ custom_sso fallback: vnpay_sso_handler.vnpay_google_sso
 import base64
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 _logger = logging.getLogger("vnpay_sso")
 
 LITELLM_UI_SESSION_DURATION = "8h"
 ALLOWED_DOMAIN = "@vnpay.vn"
+
+# ── Audit log actions (custom, chấp nhận bởi schema — action là text NOT NULL) ──
+# upstream chỉ dùng created/updated/deleted/blocked/rotated/regenerated/unblocked.
+# SSO flow thêm login/login_rejected/login_failed để track authentication.
+_AUDIT_LOGIN_OK = "login"
+_AUDIT_LOGIN_REJECTED = "login_rejected"
+_AUDIT_LOGIN_FAILED = "login_failed"
+_AUDIT_TABLE_SSO = "SSO_Session"
 
 
 def _extract_teleport_email(jwt_str: str) -> str:
@@ -110,13 +121,98 @@ async def _delete_old_sso_keys(email: str) -> int:
         return 0
 
 
-async def _make_ui_session(email: str) -> str:
+async def _user_exists(email: str) -> bool:
+    """Check user có trong LiteLLM_UserTable chưa — để phân biệt first-SSO-login
+    (cần emit `UserTable created` audit) vs re-login (chỉ emit session key).
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            return False
+        user = await prisma_client.db.litellm_usertable.find_unique(
+            where={"user_id": email}
+        )
+        return user is not None
+    except Exception as exc:
+        _logger.warning("user_exists check failed for %s: %s", email, exc)
+        return False
+
+
+async def _emit_audit(
+    changed_by: str,
+    action: str,
+    table_name: str,
+    object_id: str,
+    updated_values: Optional[Dict[str, Any]] = None,
+    before_value: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Fire-and-forget audit emission — write trực tiếp Prisma + manual dispatch
+    tới audit_log_callbacks (Splunk HEC qua vnpay_splunk_audit).
+
+    Bypass `create_audit_log_for_update` của upstream vì 2 lý do:
+    (1) Pydantic `LiteLLM_AuditLogs` restrict action ∈ {created,updated,deleted,
+        blocked,unblocked,rotated} và table_name ∈ 6 tên cứng → không cho
+        "login"/"login_rejected"/"login_failed" hoặc table "SSO_Session".
+    (2) `premium_user` bị reassign về False sau startup (proxy_server lines 813,
+        2920, 3460 re-check `_license_check.is_premium()`) → `vnpay_premium_unlock`
+        override không bền → upstream gate trả sớm.
+
+    DB schema (`action text NOT NULL`) tự do hơn Pydantic → write raw qua
+    Prisma thoải mái. Không raise — audit failure không được break login flow.
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            _logger.warning("audit skip: prisma_client is None")
+            return
+
+        import json
+        # Prisma client refuse explicit None cho jsonb fields → chỉ set key
+        # khi value thực sự có. Empty dict/None → omit field hoàn toàn.
+        data = {
+            "id": str(uuid.uuid4()),
+            "updated_at": datetime.now(timezone.utc),
+            "changed_by": changed_by,
+            "changed_by_api_key": "sso",
+            "table_name": table_name,
+            "object_id": object_id,
+            "action": action,
+        }
+        if before_value:
+            data["before_value"] = json.dumps(before_value)
+        if updated_values:
+            data["updated_values"] = json.dumps(updated_values)
+        await prisma_client.db.litellm_auditlog.create(data=data)
+
+        # Dispatch tới audit_log_callbacks (Splunk, nếu enabled). Best-effort.
+        try:
+            import litellm
+            for cb in getattr(litellm, "audit_log_callbacks", None) or []:
+                if isinstance(cb, str):
+                    continue  # string reference chưa resolve — skip
+                logger_fn = getattr(cb, "async_log_audit_log_event", None)
+                if logger_fn is not None:
+                    await logger_fn({
+                        **data,
+                        "updated_at": data["updated_at"].isoformat(),
+                    })
+        except Exception as dispatch_exc:
+            _logger.warning("audit callback dispatch failed: %s", dispatch_exc)
+    except Exception as exc:
+        _logger.warning(
+            "audit emit failed (action=%s table=%s): %s", action, table_name, exc
+        )
+
+
+async def _make_ui_session(email: str, login_method: str) -> str:
     """Tạo LiteLLM key + JWT cho UI session. Return jwt_token string.
 
     Flow:
     1. Xoá SSO keys cũ của user (pattern "UI SSO: {email}")
     2. Tạo key mới qua `generate_key_helper_fn` (trả raw `sk-xxx` cho Bearer)
     3. Encode JWT cookie chứa raw token để UI extract + gửi Bearer header
+    4. Emit audit events: UserTable created (new user), VerificationToken
+       created (session key), SSO_Session login (summary cho Splunk filter).
 
     Lý do xoá thay vì reuse: DB chỉ lưu HASH của `sk-xxx`, không phục hồi
     được raw token ở login sau. Mỗi login = key mới, xoá cũ → 1 key/user.
@@ -130,6 +226,7 @@ async def _make_ui_session(email: str) -> str:
 
     user_role = await _lookup_user_role(email)
     team_id = await _lookup_user_primary_team(email)
+    was_new_user = not await _user_exists(email)
 
     deleted = await _delete_old_sso_keys(email)
     if deleted:
@@ -148,6 +245,59 @@ async def _make_ui_session(email: str) -> str:
         team_id=team_id,
         max_budget=litellm.max_ui_session_budget,
         key_alias=f"UI SSO: {email}",
+    )
+
+    # ── Audit events (upstream generate_key_helper_fn không emit audit khi
+    # gọi từ context không phải HTTP endpoint → phải emit tay) ──
+    # IMPORTANT: key_data["token"] = raw "sk-xxx" (cho Bearer auth). DB
+    # lưu HASH của key. Audit object_id phải là hash để match convention
+    # và tránh leak raw credential vào audit log.
+    raw_key = key_data.get("token", "")
+    try:
+        from litellm.proxy.utils import hash_token
+        token_hash = hash_token(raw_key) if raw_key else ""
+    except Exception:
+        token_hash = key_data.get("token_id", "") or ""
+    if was_new_user:
+        await _emit_audit(
+            changed_by=email,
+            action="created",
+            table_name="LiteLLM_UserTable",
+            object_id=email,
+            updated_values={
+                "user_email": email,
+                "user_role": user_role,
+                "login_method": login_method,
+                "auto_provisioned_by_sso": True,
+            },
+        )
+    await _emit_audit(
+        changed_by=email,
+        action="created",
+        table_name="LiteLLM_VerificationToken",
+        object_id=token_hash,
+        updated_values={
+            "key_alias": f"UI SSO: {email}",
+            "user_id": email,
+            "team_id": team_id,
+            "user_role": user_role,
+            "duration": LITELLM_UI_SESSION_DURATION,
+            "login_method": login_method,
+        },
+    )
+    await _emit_audit(
+        changed_by=email,
+        action=_AUDIT_LOGIN_OK,
+        table_name=_AUDIT_TABLE_SSO,
+        object_id=token_hash,
+        updated_values={
+            "email": email,
+            "login_method": login_method,
+            "user_role": user_role,
+            "team_id": team_id,
+            "is_new_user": was_new_user,
+            "session_duration": LITELLM_UI_SESSION_DURATION,
+        },
     )
 
     # Field names MUST match litellm.types.proxy.ui_sso.ReturnedUITokenObject
@@ -196,10 +346,22 @@ def _register_routes() -> None:
 
             if not email.endswith(ALLOWED_DOMAIN):
                 _logger.warning("Teleport SSO: rejected email='%s'", email or "(none)")
+                await _emit_audit(
+                    changed_by=email or "(unknown)",
+                    action=_AUDIT_LOGIN_REJECTED,
+                    table_name=_AUDIT_TABLE_SSO,
+                    object_id=email or "(unknown)",
+                    updated_values={
+                        "email": email or None,
+                        "login_method": "teleport",
+                        "reason": "domain_not_allowed" if email else "jwt_missing_or_invalid",
+                        "allowed_domain": ALLOWED_DOMAIN,
+                    },
+                )
                 return RedirectResponse("/ui", status_code=302)
 
             try:
-                jwt_token = await _make_ui_session(email)
+                jwt_token = await _make_ui_session(email, login_method="teleport")
                 _logger.info("Teleport SSO: session created for %s", email)
                 # Match LiteLLM native flow: cookie-only handoff, `?login=success`
                 # flag triggers UI to read cookie. Avoid token in URL (race: UI may
@@ -209,6 +371,17 @@ def _register_routes() -> None:
                 return response
             except Exception as exc:
                 _logger.error("Teleport SSO: session error for %s: %s", email, exc)
+                await _emit_audit(
+                    changed_by=email,
+                    action=_AUDIT_LOGIN_FAILED,
+                    table_name=_AUDIT_TABLE_SSO,
+                    object_id=email,
+                    updated_values={
+                        "email": email,
+                        "login_method": "teleport",
+                        "error": str(exc)[:500],
+                    },
+                )
                 return RedirectResponse("/ui", status_code=302)
 
         _logger.info("VNPay SSO: /teleport-sso route registered")
@@ -220,16 +393,39 @@ def _register_routes() -> None:
 
             if not email.endswith(ALLOWED_DOMAIN):
                 _logger.warning("oauth2-proxy SSO: rejected '%s'", email)
+                await _emit_audit(
+                    changed_by=email or "(unknown)",
+                    action=_AUDIT_LOGIN_REJECTED,
+                    table_name=_AUDIT_TABLE_SSO,
+                    object_id=email or "(unknown)",
+                    updated_values={
+                        "email": email or None,
+                        "login_method": "oauth2_proxy",
+                        "reason": "domain_not_allowed" if email else "header_missing",
+                        "allowed_domain": ALLOWED_DOMAIN,
+                    },
+                )
                 return RedirectResponse("/oauth2/sign_out", status_code=302)
 
             try:
-                jwt_token = await _make_ui_session(email)
+                jwt_token = await _make_ui_session(email, login_method="oauth2_proxy")
                 _logger.info("oauth2-proxy SSO: session created for %s", email)
                 response = RedirectResponse("/ui/?login=success", status_code=303)
                 response.set_cookie(key="token", value=jwt_token)
                 return response
             except Exception as exc:
                 _logger.error("oauth2-proxy SSO: session error for %s: %s", email, exc)
+                await _emit_audit(
+                    changed_by=email,
+                    action=_AUDIT_LOGIN_FAILED,
+                    table_name=_AUDIT_TABLE_SSO,
+                    object_id=email,
+                    updated_values={
+                        "email": email,
+                        "login_method": "oauth2_proxy",
+                        "error": str(exc)[:500],
+                    },
+                )
                 return RedirectResponse("/oauth2/sign_out", status_code=302)
 
         _logger.info("VNPay SSO: /vnpay-sso route registered")
