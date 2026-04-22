@@ -57,6 +57,32 @@ async def _lookup_user_role(email: str) -> str:
     return "app_user"
 
 
+async def _lookup_user_primary_team(email: str) -> str:
+    """Return user's first team_id. Fallback litellm-dashboard nếu chưa có team.
+
+    LiteLLM's `generate_key_helper_fn` tạo key với `team_id` + `models=[]` sẽ
+    rơi vào trạng thái `no-default-models` nếu team không có models assign.
+    Team `litellm-dashboard` (default UI team) không có model list → key
+    không gọi được model nào → user nhận 401.
+
+    Fix: set team_id = team thực của user (ví dụ DVTT-KCN với
+    `all-proxy-models`). LiteLLM sẽ resolve model access qua team's models.
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            return "litellm-dashboard"
+        user = await prisma_client.db.litellm_usertable.find_unique(
+            where={"user_id": email}
+        )
+        teams = getattr(user, "teams", None) if user else None
+        if teams:
+            return teams[0]
+    except Exception as exc:
+        _logger.warning("user team lookup failed for %s: %s", email, exc)
+    return "litellm-dashboard"
+
+
 async def _make_ui_session(email: str) -> str:
     """Tạo LiteLLM key + JWT cho UI session. Return jwt_token string."""
     import litellm
@@ -67,6 +93,7 @@ async def _make_ui_session(email: str) -> str:
     )
 
     user_role = await _lookup_user_role(email)
+    team_id = await _lookup_user_primary_team(email)
 
     key_data = await generate_key_helper_fn(
         request_type="user",
@@ -78,7 +105,7 @@ async def _make_ui_session(email: str) -> str:
         user_id=email,
         user_email=email,
         user_role=user_role,
-        team_id="litellm-dashboard",
+        team_id=team_id,
         max_budget=litellm.max_ui_session_budget,
         key_alias=f"UI SSO: {email}",
     )
