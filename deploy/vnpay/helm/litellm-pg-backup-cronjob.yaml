@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LiteLLM Postgres daily backup
+#
+# Dump config/identity (users, teams, keys, models, policies, tool policies,
+# v.v.) vào PVC — retention 7 ngày. KHÔNG dump LiteLLM_SpendLogs và
+# LiteLLM_SpendLogToolIndex (2 bảng này ~95% size DB; data ephemeral với
+# retention 7d built-in, không cần re-backup mỗi ngày).
+#
+# Trade-off:
+# - Backup size giảm từ ~1.4GB → ~1-5MB compressed
+# - pg_dump chạy <5s thay vì 5 phút
+# - Restore từ dump này → SpendLogs tables có schema nhưng empty
+# - Muốn restore spend history cụ thể → phải dùng full dump (chạy ad-hoc)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-pg-backup
+  namespace: litellm
+spec:
+  schedule: "0 2 * * *" # 02:00 UTC daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: pg-backup-sa
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: bitnami/kubectl:latest
+              imagePullPolicy: Always
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  DEST="/var/lib/postgresql/data/litellm-backup-$TIMESTAMP.dump"
+                  echo "Backing up to $DEST (excluding SpendLogs + SpendLogToolIndex) ..."
+                  kubectl exec -n litellm litellm-postgresql-0 -- sh -c "
+                    pg_dump -U litellm -d litellm -Fc -Z9 \
+                      --exclude-table-data='public.\"LiteLLM_SpendLogs\"' \
+                      --exclude-table-data='public.\"LiteLLM_SpendLogToolIndex\"' \
+                      -f '$DEST' && echo OK && ls -lh '$DEST'
+                  "
+                  # Retention: giữ 7 bản gần nhất (daily × 7 = 1 tuần rolling)
+                  kubectl exec -n litellm litellm-postgresql-0 -- sh -c "
+                    ls -t /var/lib/postgresql/data/litellm-backup-[0-9]*.dump 2>/dev/null | tail -n +8 | xargs -r rm -v
+                    echo 'Backups on PVC:'
+                    ls -lh /var/lib/postgresql/data/litellm-backup-*.dump 2>/dev/null
+                  "
