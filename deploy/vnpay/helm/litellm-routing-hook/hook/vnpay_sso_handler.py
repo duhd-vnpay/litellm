@@ -184,6 +184,13 @@ def _register_routes() -> None:
         # Cần cấu hình Teleport app rewrite.redirect: /teleport-sso
         @app.api_route("/teleport-sso", methods=["GET", "POST", "HEAD"], include_in_schema=False)
         async def teleport_sso_login(request: Request):
+            # CRITICAL: HEAD = Teleport health probe (gửi mỗi ~30s). KHÔNG được
+            # trigger _make_ui_session vì handler sẽ delete keys cũ + tạo key
+            # mới → cookie user đang active bị invalidate → 401 storm.
+            # HEAD chỉ cần return 303 để Teleport biết endpoint sống.
+            if request.method == "HEAD":
+                return RedirectResponse("/ui/?login=success", status_code=303)
+
             jwt_str = request.headers.get("Teleport-Jwt-Assertion", "")
             email = _extract_teleport_email(jwt_str) if jwt_str else ""
 
