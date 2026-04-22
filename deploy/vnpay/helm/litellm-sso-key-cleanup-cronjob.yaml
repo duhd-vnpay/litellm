@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LiteLLM SSO session key cleanup
+#
+# Dọn định kỳ các UI SSO session keys trong LiteLLM_VerificationToken.
+# Handler (vnpay_sso_handler.py) đã có logic reuse — 1 user chỉ giữ 1 key
+# active. Nhưng vẫn còn 2 nguồn sinh key mới:
+#   1. User login lần đầu sau khi key cũ hết hạn (>8h) → tạo key mới
+#   2. User được admin re-assign team → tạo key mới khớp team
+#
+# Key cũ không được dùng lại vẫn tồn tại trong DB → cần dọn:
+#   - Expired keys (expires < NOW)
+#   - Old keys (created > 7 ngày) dù chưa expire — hiếm nhưng có thể do
+#     NULL expires từ manual DB ops
+#
+# Chạy SAU backup CronJob (02:00) để backup capture đủ state trước xoá.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-sso-key-cleanup
+  namespace: litellm
+spec:
+  schedule: "0 3 * * *" # 03:00 UTC daily (sau backup 02:00)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: pg-backup-sa # reuse SA có quyền exec vào postgres pod
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              imagePullPolicy: Always
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  echo "=== SSO key cleanup — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+                  kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c "
+                    WITH deleted AS (
+                      DELETE FROM \"LiteLLM_VerificationToken\"
+                      WHERE key_alias LIKE 'UI SSO:%'
+                        AND (
+                          (expires IS NOT NULL AND expires < NOW())
+                          OR created_at < NOW() - INTERVAL '7 days'
+                        )
+                      RETURNING token, user_id, key_alias, expires
+                    )
+                    SELECT COUNT(*) AS deleted_count FROM deleted;
+                  "
+                  echo "--- remaining SSO keys ---"
+                  kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm -c "
+                    SELECT COUNT(*) AS active_sso_keys,
+                           COUNT(DISTINCT user_id) AS distinct_users
+                    FROM \"LiteLLM_VerificationToken\"
+                    WHERE key_alias LIKE 'UI SSO:%';
+                  "
