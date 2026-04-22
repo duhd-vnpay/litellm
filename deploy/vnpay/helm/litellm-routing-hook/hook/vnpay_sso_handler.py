@@ -83,21 +83,43 @@ async def _lookup_user_primary_team(email: str) -> str:
     return "litellm-dashboard"
 
 
+async def _delete_old_sso_keys(email: str) -> int:
+    """Xoá toàn bộ SSO session keys cũ của user trước khi tạo key mới.
+
+    Reuse không khả thi (raw `sk-xxx` chỉ tồn tại ở create time, DB lưu
+    hash one-way). Thay vào đó: mỗi login → xoá keys cũ + tạo mới. Đảm
+    bảo 1 key / user / mọi thời điểm → DB không phình, UI không rối.
+
+    Trade-off: user mở session B trên device khác sẽ kick session A
+    (cookie A trỏ key đã xoá). Thực tế user thường login 1 device tại
+    một thời điểm; re-login mất ~2s qua SSO.
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            return 0
+        result = await prisma_client.db.litellm_verificationtoken.delete_many(
+            where={
+                "user_id": email,
+                "key_alias": f"UI SSO: {email}",
+            }
+        )
+        return int(result) if result else 0
+    except Exception as exc:
+        _logger.warning("old SSO keys cleanup failed for %s: %s", email, exc)
+        return 0
+
+
 async def _make_ui_session(email: str) -> str:
     """Tạo LiteLLM key + JWT cho UI session. Return jwt_token string.
 
-    Reuse active key KHÔNG KHẢ THI với LiteLLM architecture:
-    - `generate_key_helper_fn` trả về `key_data["token"]` = raw `sk-xxx`
-      (dùng làm Bearer) ngay lần tạo đầu, nhưng DB lưu dạng HASH
-      (`LiteLLM_VerificationToken.token` column là hash). Hash one-way
-      → không thể restore raw `sk-xxx` từ DB để reuse ở login sau.
-    - Backend `user_api_key_auth` hash Bearer input → match với DB hash
-      column. Gửi hash trực tiếp → mismatch → 401.
+    Flow:
+    1. Xoá SSO keys cũ của user (pattern "UI SSO: {email}")
+    2. Tạo key mới qua `generate_key_helper_fn` (trả raw `sk-xxx` cho Bearer)
+    3. Encode JWT cookie chứa raw token để UI extract + gửi Bearer header
 
-    Phương án quản lý bloat:
-    1. `litellm-sso-key-cleanup` CronJob 03:00 UTC — xoá expired keys
-    2. 8h TTL mặc định — key tự dọn sau 1 ngày làm việc
-    3. UI session duration ngắn (nếu cần giảm bloat hơn nữa, hạ xuống 2-4h)
+    Lý do xoá thay vì reuse: DB chỉ lưu HASH của `sk-xxx`, không phục hồi
+    được raw token ở login sau. Mỗi login = key mới, xoá cũ → 1 key/user.
     """
     import litellm
     import jwt as pyjwt
@@ -108,6 +130,10 @@ async def _make_ui_session(email: str) -> str:
 
     user_role = await _lookup_user_role(email)
     team_id = await _lookup_user_primary_team(email)
+
+    deleted = await _delete_old_sso_keys(email)
+    if deleted:
+        _logger.info("SSO: deleted %d old keys for %s before re-creating", deleted, email)
 
     key_data = await generate_key_helper_fn(
         request_type="user",
