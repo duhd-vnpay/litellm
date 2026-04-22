@@ -1,5 +1,7 @@
 # Hướng dẫn cấu hình Xcode Intelligence dùng LiteLLM Gateway VNPay
 
+> **Version 1.1** — cập nhật `2026-04-22` · Bản rút gọn trong [USER_GUIDE.md §6.5](../USER_GUIDE.md#65-xcode-26-macos)
+
 ## Yêu cầu
 
 - Xcode 26 trở lên (macOS Tahoe)

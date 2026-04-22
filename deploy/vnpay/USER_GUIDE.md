@@ -1,6 +1,8 @@
 # LiteLLM VNPay — User Guide
 
-Hướng dẫn end-user sử dụng LLM Gateway VNPVNPAYay: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
+> **Version 1.0** — cập nhật `2026-04-22` · [Changelog](#changelog) · Nguồn chính thức: [github.com/duhd-vnpay/litellm/blob/main/deploy/vnpay/USER_GUIDE.md](https://github.com/duhd-vnpay/litellm/blob/main/deploy/vnpay/USER_GUIDE.md)
+
+Hướng dẫn end-user sử dụng LLM Gateway VNPAY: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
 
 - **UI Dashboard**: https://litellm.x.vnshop.cloud (Teleport SSO / Google SSO `@vnpay.vn`)
 - **API endpoint**: https://api-llm.x.vnshop.cloud
@@ -528,3 +530,13 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 - Vấn đề gateway / model / quota: `duhd` Viber
 - Bug UI / feature request: tạo ticket Jira project `litellm`
 - Security incident: escalation sang `duhd` Viber
+
+---
+
+## Changelog
+
+| Version | Ngày | Thay đổi |
+|---|---|---|
+| **1.0** | 2026-04-22 | Bản đầu: login flow, danh sách 15 model với benchmark Kimi K2.6, tạo virtual key (UI + CLI), xem usage + logs, cấu hình 10 tools (Claude Code CLI + VSCode/Antigravity, Cline, Cursor, Xcode 26, Android Studio, Qwen Code, Aider, OpenAI/Anthropic SDK), troubleshooting + FAQ |
+
+**Đề xuất thay đổi**: tạo PR trên fork `duhd-vnpay/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
