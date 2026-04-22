@@ -2,6 +2,8 @@
 
 VNPay-specific deployment, routing hook, và operational config cho LiteLLM Proxy. Folder này nằm trong fork [duhd-vnpay/litellm](https://github.com/duhd-vnpay/litellm) của upstream BerriAI/litellm.
 
+> **End-user guide** (đăng nhập, tạo virtual key, cấu hình Claude Code / Cline / Xcode / Qwen Code / Aider / ...) — xem [USER_GUIDE.md](./USER_GUIDE.md).
+
 ## Architecture
 
 ```
