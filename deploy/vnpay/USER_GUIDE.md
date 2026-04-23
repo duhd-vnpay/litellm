@@ -1,6 +1,6 @@
 # VNPAY LLM Gateway — User Guide
 
-> **Version 1.1** — cập nhật `2026-04-22` · [Changelog](#changelog)
+> **Version 1.2** — cập nhật `2026-04-23` · [Changelog](#changelog)
 
 Hướng dẫn end-user sử dụng LLM Gateway VNPAY: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
 
@@ -539,9 +539,22 @@ Model Kimi K2.6 thinking mode khó tính với conversation history thiếu `rea
 
 ### Request timeout / 504
 
-- Gateway timeout = 600s (đủ cho 99% case).
+- Gateway timeout = **600s** (library-level + WAF/CDN đồng bộ). Router per-attempt timeout 300s, cover được cả fallback chain trong 600s budget.
 - Nếu dùng Claude Code/Cline và request > 10 min → check Jaeger trace qua DevOps.
-- WAF VNPay phía trước có thể timeout 60s nếu TTFB chậm → chọn model khác / tách request nhỏ hơn.
+- WAF VNPay phía trước có thể timeout 60s **TTFB** (time-to-first-byte) — nếu model chậm response token đầu → bị cắt. Chọn model khác / tách prompt nhỏ hơn / bật streaming (`stream: true`) để flush header sớm.
+
+### UI hiển thị "0 results" / "No data" trên mọi tab
+
+Triệu chứng: đăng nhập thấy dashboard bình thường nhưng Virtual Keys / Teams / Logs / Usage đều rỗng, không có error rõ ràng. Không phải mất data.
+
+**Nguyên nhân**: session cookie hết hạn (TTL = 8h) nhưng cookie vẫn còn trong browser từ lần login cũ (trước fix 2026-04-23) → mọi XHR trả 401 im lặng → UI render empty state thay vì redirect SSO.
+
+**Fix**:
+1. DevTools → Application → Cookies → `litellm.x.vnshop.cloud` → xóa cookie `token`
+2. Reload trang → tự redirect SSO → session mới
+3. Hoặc đơn giản: mở cửa sổ Incognito
+
+Từ 2026-04-23 trở đi, cookie tự xóa đúng 8h, không gặp tình trạng này nữa.
 
 ### "Missing `reasoning_content`" cho tool_use messages
 
@@ -578,6 +591,26 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 - Xem **Logs** → detail request → metadata có field `routing_reason` (nếu có, giá trị: `sensitive` / `simple` / `medium` / `complex_passthrough`).
 - Field `model` hiển thị model thực gateway call, không phải model client yêu cầu.
 
+**Q: Tôi gọi `claude-opus` nhưng response trông như Kimi / MiniMax?**
+Gateway có **fallback chain** tự động khi model gốc fail (429 quota, 5xx, timeout). Chain hiện tại:
+
+```
+claude-opus / opus-4-5 / opus-4-6  → moonshot/kimi-k2.6 → kimi-k2.5 → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
+claude-sonnet                      → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
+claude-haiku-4-5                   → vnpay/minimax → vnpay/v_glm46
+moonshot/kimi-k2.6                 → kimi-k2.5 → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
+vnpay-medium / vnpay-simple        → vnpay/minimax → vnpay/v_glm46
+```
+
+Mọi chain kết thúc ở on-prem (zero egress, $0, luôn available). Xem **Logs** → metadata → `model_id` / `api_base` để biết deployment thực sự phục vụ request. Nếu không chấp nhận fallback (ví dụ workflow coding bắt buộc Claude):
+- Đặt `"mock_testing_fallbacks": true` trong extra_body để debug, hoặc
+- Liên hệ DevOps disable fallback cho key/team cụ thể.
+
+**Context window overflow** (prompt quá dài so với model) có rule riêng:
+```
+vnpay-simple (131K) / vnpay-medium (262K) → claude-sonnet (200K)
+```
+
 **Q: Quên gia hạn virtual key → key block đột ngột**
 - UI cho phép set email alert khi spend > 80%/100% budget.
 - Team admin có thể tăng budget bất kỳ lúc nào không cần tạo key mới.
@@ -608,5 +641,6 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 |---|---|---|
 | **1.0** | 2026-04-22 | Bản đầu: login flow, danh sách 15 model với benchmark Kimi K2.6, tạo virtual key (UI + CLI), xem usage + logs, cấu hình 10 tools (Claude Code CLI + VSCode/Antigravity, Cline, Cursor, Xcode 26, Android Studio, Qwen Code, Aider, OpenAI/Anthropic SDK), troubleshooting + FAQ |
 | **1.1** | 2026-04-22 | Thêm section 6.10 Codex CLI (OpenAI official) — config `~/.codex/config.toml` với `model_providers.vnpay`, `wire_api = "chat"`, env `VNPAY_LITELLM_KEY` |
+| **1.2** | 2026-04-23 | Troubleshooting: thêm "UI hiển thị 0 results trên mọi tab" (zombie session cookie, fix 2026-04-23 — browser cũ cần clear cookie 1 lần). Troubleshooting 504: làm rõ router timeout 300s + library 600s + WAF TTFB 60s, gợi ý streaming. FAQ: thêm mục giải thích fallback chain (claude-opus → Kimi → MiniMax → on-prem) và rule context window overflow |
 
 **Đề xuất thay đổi**: tạo PR trên fork `duhd-vnpay/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
