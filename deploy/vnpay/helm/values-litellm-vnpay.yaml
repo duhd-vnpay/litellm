@@ -198,30 +198,67 @@ proxy_config:
     maximum_spend_logs_retention_period: "7d"
     maximum_spend_logs_cleanup_cron: "0 3 * * *"
 
+  # ── router_settings ───────────────────────────────────────────────────────
+  # ĐỒNG BỘ VỚI DB. `LiteLLM_Config.param_name='router_settings'` override
+  # YAML khi load. Sửa qua UI (Settings → Router) ghi vào DB; khi đó YAML ở
+  # đây chỉ là snapshot để git diff/review — phải sync lại sau mỗi thay đổi UI.
+  # Kiểm tra drift:
+  #   kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm \
+  #     -c "SELECT jsonb_pretty(param_value::jsonb) FROM \"LiteLLM_Config\" \
+  #         WHERE param_name='router_settings';"
+  # Snapshot lần cuối sync: 2026-04-23.
   router_settings:
     num_retries: 2 # Router-level global — correct scope for v1.83.3.rc.1 bug fix
-    # Fallback chain: nếu provider fail → thử provider tiếp theo
+    retry_after: 0
+    allowed_fails: 2 # fail 2 lần liên tiếp → đánh dấu deployment cooldown
+    cooldown_time: 60 # giây skip deployment sau khi hit allowed_fails
+    timeout: 300 # per-request timeout router-level (giây)
+    routing_strategy: simple-shuffle # random pick deployment cùng model_name (Kimi 3-key load balance)
+    routing_strategy_args: {}
+    model_group_alias: {}
+    # Fallback chain: provider fail (429 non-budget / 5xx / timeout) → thử deployment tiếp.
+    # Topology: mọi chain converge xuống on-prem vnpay/v_glm46 (zero egress, $0, không cap).
     fallbacks:
+      # Claude tier → Kimi K2.6 (coding tier tương đương)
       - claude-opus:
-          - claude-sonnet
+          - moonshot/kimi-k2.6
+      - claude-opus-4-5:
+          - moonshot/kimi-k2.6
+      - claude-opus-4-6:
+          - moonshot/kimi-k2.6
+      # Sonnet/Haiku → cloud cheap / on-prem
       - claude-sonnet:
-          - vnpay-medium
+          - MiniMax-M2.7
+      - claude-haiku-4-5:
+          - vnpay/minimax
+      # Kimi chain: K2.6 → K2.5 (cùng provider, budget riêng sau fix 2026-04-22) → MiniMax cloud
+      - moonshot/kimi-k2.6:
+          - moonshot/kimi-k2.5
+      - moonshot/kimi-k2.5:
+          - MiniMax-M2.7
+      # Cloud cheap tier → on-prem (terminate)
+      - MiniMax-M2.7:
+          - vnpay/minimax
       - vnpay-medium:
-          - vnpay-simple # Kimi medium fail → Kimi simple
-    # Context window overflow → escalate lên tier cao hơn
+          - vnpay/minimax
+      - vnpay-simple:
+          - vnpay/minimax
+      # On-prem MiniMax → on-prem GLM-4 (final hop)
+      - vnpay/minimax:
+          - vnpay/v_glm46
+    # Context window overflow → escalate lên Claude (200K). Kill switch tránh
+    # ContextWindowExceededError khi prompt > 131K/262K của on-prem/Kimi.
     context_window_fallbacks:
       - vnpay-simple:
-          - claude-sonnet # Kimi 128K overflow → Claude Sonnet
+          - claude-sonnet # MiniMax on-prem 131K overflow
       - vnpay-medium:
-          - claude-sonnet # Kimi 128K overflow → Claude Sonnet
-    allowed_fails: 2 # cho phép fail 2 lần trước khi cooldown
-    cooldown_time: 60 # giây cooldown khi provider bị đánh dấu fail
+          - claude-sonnet # Kimi K2.5 262K overflow
 
   litellm_settings:
     num_retries: 2 # Library-level fallback (may not reach router in v1.83.3.rc.1)
     modify_params: true # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
     use_chat_completions_url_for_anthropic_messages: true # Force chat/completions path — tắt Responses API routing cho openai provider (vnpay/minimax on-premise)
-    request_timeout: 600
+    request_timeout: 300 # khớp router_settings.timeout + DB runtime. WAF/CDN raise 600s nên có 2x headroom.
     cache: true
     cache_params:
       type: redis

@@ -284,24 +284,22 @@ vnpay-medium   (262K) → claude-sonnet (200K)
 
 Kill switch cho `ContextWindowExceededError` upstream. Chỉ 2 rule này vì on-prem context hẹp nhất — khi client prompt dài hơn 131K/262K, escalate lên Claude (200K). Các model cloud khác (Kimi K2.6 256K, MiniMax-M2.7 1M) đủ context nên không cần rule.
 
-### YAML vs DB — drift hiện tại
+### YAML ↔ DB sync
 
-| Item | YAML | DB (runtime) |
-|---|---|---|
-| `fallbacks` | 3 rule (`claude-opus/claude-sonnet/vnpay-medium`) | 11 rule (đầy đủ ở trên) |
-| `context_window_fallbacks` | 2 rule | 2 rule (khớp) |
-| `timeout` | `request_timeout: 600` (litellm_settings) | `timeout: 300` (router_settings) + `request_timeout: 300` (litellm_settings) |
-| `num_retries` | 2 | 2 |
-| `allowed_fails` | 2 | 2 |
-| `cooldown_time` | 60 | 60 |
-| `routing_strategy` | — | `simple-shuffle` |
+YAML đã được align với DB lần cuối **2026-04-23** (commit tiếp theo sau fallback rewrite). Tất cả 11 fallback + 2 context_window_fallbacks + `timeout: 300` + `routing_strategy: simple-shuffle` hiện đã có trong [values-litellm-vnpay.yaml](helm/values-litellm-vnpay.yaml).
 
-→ Nếu sửa YAML + `helm upgrade` thì YAML **không có tác dụng** cho các field đã tồn tại trong DB. Muốn chỉnh fallback phải:
+**Quy trình thay đổi fallback** (nhớ đồng bộ cả 2 chiều):
 
-1. Qua UI: Settings → Router → edit → Save
-2. Hoặc raw: `UPDATE "LiteLLM_Config" SET param_value=... WHERE param_name='router_settings';` + restart pod (router_settings đọc 1 lần lúc init, không hot-reload)
+1. Sửa trên UI: Settings → Router → edit → Save → DB cập nhật ngay + restart 1 pod để load (`router_settings` init 1 lần, không hot-reload).
+2. Export DB về YAML để commit:
+   ```bash
+   kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm \
+     -c "SELECT jsonb_pretty(param_value::jsonb) FROM \"LiteLLM_Config\" \
+         WHERE param_name='router_settings';"
+   ```
+3. Paste vào `router_settings:` trong values file, commit (git diff review được).
 
-Để đồng bộ YAML với DB thực tế, dùng: `kubectl exec litellm-postgresql-0 -- psql -U litellm -d litellm -c "..."` export JSON rồi paste vào values file.
+**Ngược lại** — sửa YAML rồi `helm upgrade` **không ghi đè DB** cho các field đã tồn tại (DB wins). Nếu muốn YAML thắng: `DELETE FROM "LiteLLM_Config" WHERE param_name='router_settings';` + restart → LiteLLM load lại từ file config. Cẩn thận: mất mọi UI edit khác.
 
 ### Retry + cooldown tunables (DB)
 
