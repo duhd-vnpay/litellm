@@ -250,43 +250,77 @@ Kimi K2.5 (3 keys load-balanced), Claude Haiku/Sonnet/Opus variants, MiniMax-M2.
 
 ## Fallback Chain
 
-Config tại [values-litellm-vnpay.yaml](helm/values-litellm-vnpay.yaml) `router_settings` — LiteLLM Router tự retry + fallback khi provider trả 429 / 5xx / timeout.
+⚠️ **DB là source of truth, không phải YAML.** `router_settings` trong [values-litellm-vnpay.yaml](helm/values-litellm-vnpay.yaml) chỉ là bootstrap — khi thao tác qua UI (Settings → Router / Fallbacks) hoặc `/config/update` API, LiteLLM ghi vào `LiteLLM_Config` table (`param_name='router_settings'`) và **override hoàn toàn** YAML khi load. Kiểm tra runtime config:
 
-### Primary fallback (provider fail → provider khác)
-
-```
-claude-opus     → claude-sonnet
-claude-sonnet   → vnpay-medium   (= moonshot/kimi-k2.5, cloud)
-vnpay-medium    → vnpay-simple   (= vnpay/minimax, on-premise $0)
+```bash
+kubectl exec -n litellm litellm-postgresql-0 -- psql -U litellm -d litellm \
+  -c "SELECT jsonb_pretty(param_value::jsonb) FROM \"LiteLLM_Config\" WHERE param_name='router_settings';"
 ```
 
-→ Trip fail toàn tuyến kết thúc ở on-premise VNPay GenAI (zero egress, miễn phí, luôn available). Claude quota cạn / Kimi budget saturate / Kimi 429 → request vẫn complete qua MiniMax.
-
-### Context window overflow (input > context)
+### Primary fallback (trạng thái hiện tại trên DB, snapshot 2026-04-23)
 
 ```
-vnpay-simple  (131K) → claude-sonnet (200K)
-vnpay-medium  (262K) → claude-sonnet (200K)
+claude-opus          → moonshot/kimi-k2.6
+claude-opus-4-5      → moonshot/kimi-k2.6
+claude-opus-4-6      → moonshot/kimi-k2.6
+claude-sonnet        → MiniMax-M2.7
+claude-haiku-4-5     → vnpay/minimax
+moonshot/kimi-k2.6   → moonshot/kimi-k2.5
+moonshot/kimi-k2.5   → MiniMax-M2.7
+MiniMax-M2.7         → vnpay/minimax
+vnpay-medium         → vnpay/minimax
+vnpay-simple         → vnpay/minimax
+vnpay/minimax        → vnpay/v_glm46
 ```
 
-Lưu ý: `vnpay-medium` alias → Kimi K2.5 (262K), `vnpay-simple` → MiniMax on-prem (131K). Rule chỉ trigger khi thực sự overflow — kill switch tránh `ContextWindowExceededError`.
+**Topology thực tế**: tất cả chain đều converge về on-prem (`vnpay/minimax` → `vnpay/v_glm46`, $0, zero egress, không có cap). Claude Opus degrade sang Kimi K2.6 (cùng tier coding), Claude Sonnet nhảy thẳng sang MiniMax cloud (cheap long-context), Kimi K2.6 → K2.5 (cùng provider, budget riêng sau fix incident 2026-04-22) → MiniMax. `vnpay-medium` / `vnpay-simple` / `MiniMax-M2.7` đều rơi xuống on-prem khi fail.
 
-### Retry + cooldown tunables
+### Context window overflow
 
-| Setting | Giá trị | Scope | Ghi chú |
-|---|---|---|---|
-| `num_retries` | `2` | `router_settings` + `litellm_settings` | Double-set: v1.83.3.rc.1 có bug fallback routing, router-level là nguồn chính, library-level fallback |
-| `num_retries` | `2` | per-model (`model_list[*].litellm_params`) | Áp cho mọi model YAML-defined. DB-stored models: gán qua `litellm-post-upgrade-job.yaml` |
-| `allowed_fails` | `2` | `router_settings` | Cho phép fail 2 lần liên tiếp trước khi đánh dấu deployment cooldown |
-| `cooldown_time` | `60s` | `router_settings` | Deployment bị skip trong 60s sau khi hit `allowed_fails`. Quá ngắn với budget-based 429 (reset theo ngày, không theo phút — xem incident 2026-04-22) |
-| `request_timeout` | `600s` | `litellm_settings` | Match timeout WAF + CDN Edge đã chỉnh từ 50s lên 600s |
+```
+vnpay-simple   (131K) → claude-sonnet (200K)
+vnpay-medium   (262K) → claude-sonnet (200K)
+```
 
-### Gotchas đã gặp
+Kill switch cho `ContextWindowExceededError` upstream. Chỉ 2 rule này vì on-prem context hẹp nhất — khi client prompt dài hơn 131K/262K, escalate lên Claude (200K). Các model cloud khác (Kimi K2.6 256K, MiniMax-M2.7 1M) đủ context nên không cần rule.
 
-- **Budget-based 429 ≠ rate limit**: Moonshot project-level `consumption budget` cạn → trả 429 "exceeded consumption budget". LiteLLM coi là `RateLimitError` → cooldown 60s → retry → 429 → fallback. Cooldown 60s vô nghĩa vì budget reset theo ngày. Fix đang dùng: tăng budget cap + tách project silo (incident 2026-04-22).
-- **Context window fallback chỉ trigger khi upstream raise `ContextWindowExceededError` chính xác**: nếu provider trả 400 generic → không fallback. Kimi + MiniMax đã được map đúng.
-- **Fallback không cover auth error**: 401/403 (key invalid/blocked) không trigger fallback — fail fast. Đúng behavior (không muốn masking config bug).
-- **Library-level vs router-level `num_retries`**: v1.83.3.rc.1 có bug scope, set cả 2 chỗ làm safety net. Khi upgrade LiteLLM, kiểm tra behavior + có thể xóa 1 trong 2.
+### YAML vs DB — drift hiện tại
+
+| Item | YAML | DB (runtime) |
+|---|---|---|
+| `fallbacks` | 3 rule (`claude-opus/claude-sonnet/vnpay-medium`) | 11 rule (đầy đủ ở trên) |
+| `context_window_fallbacks` | 2 rule | 2 rule (khớp) |
+| `timeout` | `request_timeout: 600` (litellm_settings) | `timeout: 300` (router_settings) + `request_timeout: 300` (litellm_settings) |
+| `num_retries` | 2 | 2 |
+| `allowed_fails` | 2 | 2 |
+| `cooldown_time` | 60 | 60 |
+| `routing_strategy` | — | `simple-shuffle` |
+
+→ Nếu sửa YAML + `helm upgrade` thì YAML **không có tác dụng** cho các field đã tồn tại trong DB. Muốn chỉnh fallback phải:
+
+1. Qua UI: Settings → Router → edit → Save
+2. Hoặc raw: `UPDATE "LiteLLM_Config" SET param_value=... WHERE param_name='router_settings';` + restart pod (router_settings đọc 1 lần lúc init, không hot-reload)
+
+Để đồng bộ YAML với DB thực tế, dùng: `kubectl exec litellm-postgresql-0 -- psql -U litellm -d litellm -c "..."` export JSON rồi paste vào values file.
+
+### Retry + cooldown tunables (DB)
+
+| Setting | Giá trị | Ghi chú |
+|---|---|---|
+| `num_retries` | `2` | Router-level. Library-level `litellm_settings.num_retries=2` set song song do bug v1.83.3.rc.1 scope-routing. Per-model `num_retries=2` áp qua YAML hoặc `litellm-post-upgrade-job.yaml` cho DB-stored models |
+| `allowed_fails` | `2` | 2 fail liên tiếp → deployment cooldown |
+| `cooldown_time` | `60s` | Skip deployment 60s. **Quá ngắn với budget-based 429** (reset theo ngày, không theo phút — xem incident 2026-04-22 Moonshot) |
+| `timeout` | `300s` | Router-level per-request timeout. Match `request_timeout` ở litellm_settings. WAF/CDN đã raise lên 600s nên có headroom 2x |
+| `routing_strategy` | `simple-shuffle` | Random pick 1 trong N deployment cùng `model_name`. Dùng cho Kimi 3-key load balance |
+
+### Gotchas
+
+- **YAML không thắng DB**: `helm upgrade` xong mà thấy fallback không đổi → `LiteLLM_Config.router_settings` đã override. Phải sửa qua UI / DB / `/config/update`.
+- **Budget-based 429 ≠ rate limit**: Moonshot project `consumption budget` cạn → 429 "exceeded consumption budget". LiteLLM coi là `RateLimitError` → cooldown 60s → retry → fail lại. Cooldown vô nghĩa vì budget reset theo ngày. Fix production: tăng cap + tách project silo (incident 2026-04-22).
+- **Context window fallback** chỉ trigger khi upstream raise `ContextWindowExceededError` chính xác; provider trả 400 generic → không fallback.
+- **Auth error (401/403)** không fallback — fail fast, đúng behavior (không muốn mask config bug bằng cách request lẽ ra bị chặn lại thành công ở model khác).
+- **`simple-shuffle` không sticky**: 2 request liên tiếp từ cùng user có thể hit 2 deployment khác nhau cùng `model_name`. Với Kimi 3-key cloud — OK (mỗi key project riêng). Nếu cần sticky (ví dụ cache prompt caching theo key) → đổi sang `usage-based-routing-v2` hoặc `latency-based-routing`.
+- **`num_retries` double-set**: v1.83.3.rc.1 có bug scope, set cả `router_settings` + `litellm_settings` làm safety net. Khi upgrade LiteLLM, test lại + có thể bỏ 1 trong 2.
 
 ## Networking & IP Logging
 
