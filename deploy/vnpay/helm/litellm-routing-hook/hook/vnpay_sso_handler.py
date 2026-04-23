@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 _logger = logging.getLogger("vnpay_sso")
 
 LITELLM_UI_SESSION_DURATION = "8h"
+LITELLM_UI_SESSION_MAX_AGE = 8 * 3600  # giây — phải khớp LITELLM_UI_SESSION_DURATION
 ALLOWED_DOMAIN = "@vnpay.vn"
 
 # ── Audit log actions (custom, chấp nhận bởi schema — action là text NOT NULL) ──
@@ -367,7 +368,18 @@ def _register_routes() -> None:
                 # flag triggers UI to read cookie. Avoid token in URL (race: UI may
                 # fire /models before useEffect extracts URL token → Bearer undefined).
                 response = RedirectResponse("/ui/?login=success", status_code=303)
-                response.set_cookie(key="token", value=jwt_token)
+                # Max-Age khớp TTL token (8h). Thiếu Max-Age → browser giữ cookie
+                # vô hạn, token backend expire nhưng UI vẫn gửi cookie cũ → loạt XHR
+                # 401 trên /key/list, /team/list... UI render "0 results" thay vì
+                # redirect SSO (nginx handoff rule chỉ trigger khi cookie='').
+                response.set_cookie(
+                    key="token",
+                    value=jwt_token,
+                    max_age=LITELLM_UI_SESSION_MAX_AGE,
+                    # httponly=False — UI đọc cookie qua JS để inject Bearer header.
+                    secure=True,
+                    samesite="lax",
+                )
                 return response
             except Exception as exc:
                 _logger.error("Teleport SSO: session error for %s: %s", email, exc)
@@ -411,7 +423,14 @@ def _register_routes() -> None:
                 jwt_token = await _make_ui_session(email, login_method="oauth2_proxy")
                 _logger.info("oauth2-proxy SSO: session created for %s", email)
                 response = RedirectResponse("/ui/?login=success", status_code=303)
-                response.set_cookie(key="token", value=jwt_token)
+                response.set_cookie(
+                    key="token",
+                    value=jwt_token,
+                    max_age=LITELLM_UI_SESSION_MAX_AGE,
+                    # httponly=False — UI đọc cookie qua JS để inject Bearer header.
+                    secure=True,
+                    samesite="lax",
+                )
                 return response
             except Exception as exc:
                 _logger.error("oauth2-proxy SSO: session error for %s: %s", email, exc)
