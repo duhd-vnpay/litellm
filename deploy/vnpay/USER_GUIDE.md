@@ -1,6 +1,6 @@
 # VNPAY LLM Gateway — User Guide
 
-> **Version 1.2** — cập nhật `2026-04-23` · [Changelog](#changelog)
+> **Version 1.3** — cập nhật `2026-04-23` · [Changelog](#changelog)
 
 Hướng dẫn end-user sử dụng LLM Gateway VNPAY: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
 
@@ -519,7 +519,80 @@ print(msg.content[0].text)
 
 ---
 
-## 7. Troubleshooting
+## 7. Fallback Chain
+
+Gateway tự động chuyển request sang model khác khi model gốc fail (429 quota, 5xx, timeout, context overflow). User không phải retry thủ công — request vẫn hoàn tất, chỉ là **response có thể đến từ model khác model yêu cầu**.
+
+### Primary fallback (model fail → model dự phòng)
+
+Snapshot `2026-04-23`:
+
+```
+claude-opus          → moonshot/kimi-k2.6
+claude-opus-4-5      → moonshot/kimi-k2.6
+claude-opus-4-6      → moonshot/kimi-k2.6
+claude-sonnet        → MiniMax-M2.7
+claude-haiku-4-5     → vnpay/minimax
+moonshot/kimi-k2.6   → moonshot/kimi-k2.5
+moonshot/kimi-k2.5   → MiniMax-M2.7
+MiniMax-M2.7         → vnpay/minimax
+vnpay-medium         → vnpay/minimax
+vnpay-simple         → vnpay/minimax
+vnpay/minimax        → vnpay/v_glm46
+```
+
+**Topology**: mọi chain đều converge về on-prem (`vnpay/minimax` → `vnpay/v_glm46`, $0, zero egress, không bị cap budget) → request không bao giờ fail hoàn toàn nếu on-prem còn sống.
+
+- **Claude Opus** (4-5 / 4-6 / alias) → **Kimi K2.6** (cùng tier coding/reasoning, intelligence index tương đương, rẻ hơn ~15x).
+- **Claude Sonnet** → **MiniMax-M2.7** (cloud cheap long-context 1M).
+- **Claude Haiku** → **vnpay/minimax** on-prem (tương đương tier small-fast-model).
+- **Kimi K2.6** → **K2.5** (cùng provider, từ 2026-04-22 đã tách project budget riêng nên 2 key không chia sẻ cap).
+- **Kimi K2.5** → **MiniMax-M2.7** (cloud cheap).
+- **MiniMax-M2.7 / vnpay-medium / vnpay-simple** → **vnpay/minimax** (on-prem terminate).
+- **vnpay/minimax** → **vnpay/v_glm46** (on-prem final hop, khác model weights để giảm correlated failure).
+
+### Context window overflow
+
+Khi prompt vượt context của model → escalate lên Claude Sonnet (200K):
+
+```
+vnpay-simple   (131K MiniMax on-prem)   → claude-sonnet (200K)
+vnpay-medium   (262K Kimi K2.5)          → claude-sonnet (200K)
+```
+
+Các model khác (Kimi K2.6 256K, MiniMax-M2.7 1M, Claude 200K) đủ context cho mọi prompt thực tế nên không cần rule.
+
+### Retry + cooldown
+
+| Tham số | Giá trị | Ý nghĩa |
+|---|---|---|
+| `num_retries` | 2 | Retry 2 lần trên cùng deployment trước khi fallback |
+| `allowed_fails` | 2 | 2 fail liên tiếp → deployment bị đánh dấu cooldown |
+| `cooldown_time` | 60s | Deployment bị skip trong 60s sau cooldown |
+| `timeout` (router) | 300s | Per-attempt deployment timeout |
+| `request_timeout` (library) | 600s | Tổng budget cả fallback chain |
+| `routing_strategy` | `simple-shuffle` | Random pick 1 trong N key cùng model (Kimi 3-key load balance) |
+
+### Cách biết request đã bị fallback
+
+Trong **Logs** → click detail request → xem:
+- `model` field = model thực gateway call (không phải model client yêu cầu).
+- `metadata.routing_reason` (nếu có) = lý do routing hook chọn model: `sensitive` / `simple` / `medium` / `complex_passthrough`.
+- `model_id` + `api_base` = deployment cụ thể trong pool (hữu ích khi 1 model có nhiều key, ví dụ Kimi 3 project).
+
+Ví dụ: gọi `claude-opus` → log hiện `model: moonshot/kimi-k2.6` nghĩa là Claude Opus đã fail và request được phục vụ bởi Kimi K2.6 fallback.
+
+### Lưu ý quan trọng
+
+- **Auth error (401/403) KHÔNG fallback** — fail fast. Nếu virtual key thiếu quyền dùng model → trả lỗi ngay, không thử model khác (tránh masking config bug).
+- **Fallback không cover mọi 400**: Chỉ fallback khi upstream raise `ContextWindowExceededError` chính xác; provider trả 400 generic (ví dụ invalid tool schema) → fail luôn.
+- **Budget-based 429 ≠ rate limit**: Moonshot trả 429 "exceeded consumption budget" (project budget cạn theo ngày) — LiteLLM coi là rate limit, cooldown 60s rồi retry → vẫn fail (budget reset theo ngày). Đã fix production: tăng cap + tách project silo. Nếu gặp spike fallback 100% → báo DevOps check budget.
+- **Muốn TẮT fallback cho 1 request** (ví dụ workflow coding bắt buộc Claude, không chấp nhận response Kimi): gửi header/body `"disable_fallbacks": true` hoặc liên hệ DevOps disable cho key/team.
+- **`simple-shuffle` không sticky**: 2 request liên tiếp có thể hit 2 Kimi key khác nhau → Moonshot prompt caching không tận dụng được (mỗi project cache riêng). Chấp nhận tradeoff để load balance đều.
+
+---
+
+## 8. Troubleshooting
 
 ### 401 Unauthorized
 
@@ -576,7 +649,7 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 
 ---
 
-## 8. FAQ
+## 9. FAQ
 
 **Q: Virtual key khác master key?**
 - Master key: full permission, chỉ admin giữ, không nên phân phối.
@@ -587,29 +660,11 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 - Model Claude / Kimi / MiniMax cloud → data gửi sang provider tương ứng (tuân thủ DPA). **Không gửi dữ liệu nhạy cảm** qua các model này.
 - Routing hook có keyword detection tự động redirect PII → on-premise (xem README `Routing Hook`).
 
-**Q: Làm sao biết routing hook đã route sang model khác?**
-- Xem **Logs** → detail request → metadata có field `routing_reason` (nếu có, giá trị: `sensitive` / `simple` / `medium` / `complex_passthrough`).
-- Field `model` hiển thị model thực gateway call, không phải model client yêu cầu.
-
-**Q: Tôi gọi `claude-opus` nhưng response trông như Kimi / MiniMax?**
-Gateway có **fallback chain** tự động khi model gốc fail (429 quota, 5xx, timeout). Chain hiện tại:
-
-```
-claude-opus / opus-4-5 / opus-4-6  → moonshot/kimi-k2.6 → kimi-k2.5 → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
-claude-sonnet                      → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
-claude-haiku-4-5                   → vnpay/minimax → vnpay/v_glm46
-moonshot/kimi-k2.6                 → kimi-k2.5 → MiniMax-M2.7 → vnpay/minimax → vnpay/v_glm46
-vnpay-medium / vnpay-simple        → vnpay/minimax → vnpay/v_glm46
-```
-
-Mọi chain kết thúc ở on-prem (zero egress, $0, luôn available). Xem **Logs** → metadata → `model_id` / `api_base` để biết deployment thực sự phục vụ request. Nếu không chấp nhận fallback (ví dụ workflow coding bắt buộc Claude):
-- Đặt `"mock_testing_fallbacks": true` trong extra_body để debug, hoặc
-- Liên hệ DevOps disable fallback cho key/team cụ thể.
-
-**Context window overflow** (prompt quá dài so với model) có rule riêng:
-```
-vnpay-simple (131K) / vnpay-medium (262K) → claude-sonnet (200K)
-```
+**Q: Làm sao biết gateway đã route / fallback sang model khác?**
+Xem chi tiết cơ chế ở section **7. Fallback Chain**. Tóm tắt:
+- **Logs** → detail request → `model` field = model thực sự phục vụ request.
+- `metadata.routing_reason` = lý do routing hook chọn (`sensitive` / `simple` / `medium` / `complex_passthrough`).
+- Nếu `model` ≠ model client yêu cầu → đã fallback do upstream fail (xem section 7 biết chain).
 
 **Q: Quên gia hạn virtual key → key block đột ngột**
 - UI cho phép set email alert khi spend > 80%/100% budget.
@@ -642,5 +697,6 @@ vnpay-simple (131K) / vnpay-medium (262K) → claude-sonnet (200K)
 | **1.0** | 2026-04-22 | Bản đầu: login flow, danh sách 15 model với benchmark Kimi K2.6, tạo virtual key (UI + CLI), xem usage + logs, cấu hình 10 tools (Claude Code CLI + VSCode/Antigravity, Cline, Cursor, Xcode 26, Android Studio, Qwen Code, Aider, OpenAI/Anthropic SDK), troubleshooting + FAQ |
 | **1.1** | 2026-04-22 | Thêm section 6.10 Codex CLI (OpenAI official) — config `~/.codex/config.toml` với `model_providers.vnpay`, `wire_api = "chat"`, env `VNPAY_LITELLM_KEY` |
 | **1.2** | 2026-04-23 | Troubleshooting: thêm "UI hiển thị 0 results trên mọi tab" (zombie session cookie, fix 2026-04-23 — browser cũ cần clear cookie 1 lần). Troubleshooting 504: làm rõ router timeout 300s + library 600s + WAF TTFB 60s, gợi ý streaming. FAQ: thêm mục giải thích fallback chain (claude-opus → Kimi → MiniMax → on-prem) và rule context window overflow |
+| **1.3** | 2026-04-23 | Thêm section **7. Fallback Chain** đầy đủ (snapshot DB): 11 rule primary + 2 context overflow, topology converge on-prem, bảng retry tunables (num_retries/allowed_fails/cooldown_time/timeout/routing_strategy), cách đọc `metadata.routing_reason` + `model_id` trong Logs, gotcha budget-based 429, disable fallback per-request, simple-shuffle không sticky. Dời FAQ fallback cũ thành link tới section 7. `request_timeout` library-level 600s (match WAF). Renumber: Troubleshooting 7→8, FAQ 8→9 |
 
 **Đề xuất thay đổi**: tạo PR trên fork `duhd-vnpay/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
