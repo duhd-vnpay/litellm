@@ -258,7 +258,7 @@ proxy_config:
     num_retries: 2 # Library-level fallback (may not reach router in v1.83.3.rc.1)
     modify_params: true # Auto-fix Anthropic tool_choice without tools= (Xcode/Copilot compat)
     use_chat_completions_url_for_anthropic_messages: true # Force chat/completions path — tắt Responses API routing cho openai provider (vnpay/minimax on-premise)
-    request_timeout: 300 # khớp router_settings.timeout + DB runtime. WAF/CDN raise 600s nên có 2x headroom.
+    request_timeout: 600 # match WAF + CDN Edge timeout 600s. Router-level timeout=300 vẫn áp per-attempt; library-level cover toàn bộ request (bao gồm fallback chain).
     cache: true
     cache_params:
       type: redis
