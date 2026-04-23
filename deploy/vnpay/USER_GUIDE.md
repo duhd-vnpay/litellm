@@ -701,4 +701,4 @@ Xem chi tiết cơ chế ở section **7. Fallback Chain**. Tóm tắt:
 | **1.4** | 2026-04-23 | Note timestamp UI hiển thị giờ Hà Nội (ICT, UTC+7) từ 2026-04-23 sau khi container set `TZ=Asia/Ho_Chi_Minh`. Row DB cũ hơn vẫn UTC. Cleanup job chạy 03:00 UTC = 10:00 ICT |
 | **1.3** | 2026-04-23 | Thêm section **7. Fallback Chain** đầy đủ (snapshot DB): 11 rule primary + 2 context overflow, topology converge on-prem, bảng retry tunables (num_retries/allowed_fails/cooldown_time/timeout/routing_strategy), cách đọc `metadata.routing_reason` + `model_id` trong Logs, gotcha budget-based 429, disable fallback per-request, simple-shuffle không sticky. Dời FAQ fallback cũ thành link tới section 7. `request_timeout` library-level 600s (match WAF). Renumber: Troubleshooting 7→8, FAQ 8→9 |
 
-**Đề xuất thay đổi**: tạo PR trên fork `duhd-vnpay/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
+**Đề xuất thay đổi**: tạo MR trên `git.vnpay.vn/duhd/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
