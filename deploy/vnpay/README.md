@@ -250,14 +250,43 @@ Kimi K2.5 (3 keys load-balanced), Claude Haiku/Sonnet/Opus variants, MiniMax-M2.
 
 ## Fallback Chain
 
-```
-claude-opus → claude-sonnet → vnpay-medium → vnpay-simple
-moonshot/kimi-k2.5 → vnpay/minimax (on-premise)
+Config tại [values-litellm-vnpay.yaml](helm/values-litellm-vnpay.yaml) `router_settings` — LiteLLM Router tự retry + fallback khi provider trả 429 / 5xx / timeout.
 
-Context window overflow:
-  vnpay-simple (128K) → claude-sonnet
-  vnpay-medium (128K) → claude-sonnet
+### Primary fallback (provider fail → provider khác)
+
 ```
+claude-opus     → claude-sonnet
+claude-sonnet   → vnpay-medium   (= moonshot/kimi-k2.5, cloud)
+vnpay-medium    → vnpay-simple   (= vnpay/minimax, on-premise $0)
+```
+
+→ Trip fail toàn tuyến kết thúc ở on-premise VNPay GenAI (zero egress, miễn phí, luôn available). Claude quota cạn / Kimi budget saturate / Kimi 429 → request vẫn complete qua MiniMax.
+
+### Context window overflow (input > context)
+
+```
+vnpay-simple  (131K) → claude-sonnet (200K)
+vnpay-medium  (262K) → claude-sonnet (200K)
+```
+
+Lưu ý: `vnpay-medium` alias → Kimi K2.5 (262K), `vnpay-simple` → MiniMax on-prem (131K). Rule chỉ trigger khi thực sự overflow — kill switch tránh `ContextWindowExceededError`.
+
+### Retry + cooldown tunables
+
+| Setting | Giá trị | Scope | Ghi chú |
+|---|---|---|---|
+| `num_retries` | `2` | `router_settings` + `litellm_settings` | Double-set: v1.83.3.rc.1 có bug fallback routing, router-level là nguồn chính, library-level fallback |
+| `num_retries` | `2` | per-model (`model_list[*].litellm_params`) | Áp cho mọi model YAML-defined. DB-stored models: gán qua `litellm-post-upgrade-job.yaml` |
+| `allowed_fails` | `2` | `router_settings` | Cho phép fail 2 lần liên tiếp trước khi đánh dấu deployment cooldown |
+| `cooldown_time` | `60s` | `router_settings` | Deployment bị skip trong 60s sau khi hit `allowed_fails`. Quá ngắn với budget-based 429 (reset theo ngày, không theo phút — xem incident 2026-04-22) |
+| `request_timeout` | `600s` | `litellm_settings` | Match timeout WAF + CDN Edge đã chỉnh từ 50s lên 600s |
+
+### Gotchas đã gặp
+
+- **Budget-based 429 ≠ rate limit**: Moonshot project-level `consumption budget` cạn → trả 429 "exceeded consumption budget". LiteLLM coi là `RateLimitError` → cooldown 60s → retry → 429 → fallback. Cooldown 60s vô nghĩa vì budget reset theo ngày. Fix đang dùng: tăng budget cap + tách project silo (incident 2026-04-22).
+- **Context window fallback chỉ trigger khi upstream raise `ContextWindowExceededError` chính xác**: nếu provider trả 400 generic → không fallback. Kimi + MiniMax đã được map đúng.
+- **Fallback không cover auth error**: 401/403 (key invalid/blocked) không trigger fallback — fail fast. Đúng behavior (không muốn masking config bug).
+- **Library-level vs router-level `num_retries`**: v1.83.3.rc.1 có bug scope, set cả 2 chỗ làm safety net. Khi upgrade LiteLLM, kiểm tra behavior + có thể xóa 1 trong 2.
 
 ## Networking & IP Logging
 
