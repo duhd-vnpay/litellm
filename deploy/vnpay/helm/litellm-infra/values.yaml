@@ -44,6 +44,19 @@ pgbouncer:
       memory: 64Mi
       cpu: 250m
 
+# ─── PostgreSQL read-only user (dùng cho GoClaw ops agent analytics) ─────────
+readOnlyUser:
+  enabled: true
+  username: litellm_ro
+  # Password Secret được tạo out-of-band (không render vào chart):
+  #   kubectl create secret generic litellm-ro-credentials \
+  #     --from-literal=password=<RO_PASSWORD> \
+  #     --from-literal=dsn=postgresql://litellm_ro:<RO_PASSWORD>@litellm-postgresql:5432/litellm?sslmode=disable \
+  #     -n litellm
+  passwordSecret:
+    name: litellm-ro-credentials
+    key: password
+
 # ─── Redis ────────────────────────────────────────────────────────────────────
 redis:
   enabled: true

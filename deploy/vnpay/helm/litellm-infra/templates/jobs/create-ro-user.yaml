@@ -1,0 +1,116 @@
+{{- if .Values.readOnlyUser.enabled -}}
+# ═══════════════════════════════════════════════════════════════════════════════
+# PostgreSQL read-only user bootstrap Job
+# ───────────────────────────────────────────────────────────────────────────────
+# Creates role `litellm_ro` with CONNECT on database + USAGE on schema public +
+# SELECT on all existing & future tables. Password read from Secret
+# `litellm-ro-credentials` (key: password) — Secret must be created
+# out-of-band BEFORE installing/upgrading this chart.
+#
+# Hook: post-install, post-upgrade. Idempotent (CREATE/ALTER pattern).
+# ═══════════════════════════════════════════════════════════════════════════════
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-create-ro-user
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/name: litellm-infra
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm-infra
+        app.kubernetes.io/component: bootstrap-job
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-ro-user
+          image: {{ .Values.postgresql.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGHOST
+              value: litellm-postgresql.{{ .Values.global.namespace }}.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: {{ .Values.postgresql.database | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres-credentials
+                  key: password
+            - name: RO_USER
+              value: {{ .Values.readOnlyUser.username | quote }}
+            - name: RO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.readOnlyUser.passwordSecret.name | quote }}
+                  key: {{ .Values.readOnlyUser.passwordSecret.key | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              echo "[ro-bootstrap] waiting for postgres..."
+              for i in $(seq 1 30); do
+                if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; then
+                  break
+                fi
+                sleep 2
+              done
+
+              # RO_USER must be [a-z0-9_]+ to be safe in identifier interpolation
+              case "$RO_USER" in
+                *[!a-z0-9_]*|"") echo "[ro-bootstrap] invalid RO_USER" >&2; exit 1 ;;
+              esac
+
+              echo "[ro-bootstrap] ensuring role \"$RO_USER\"..."
+              # Pass password as psql variable (:'ro_pwd' → quoted literal),
+              # interpolate identifier directly (validated by regex above).
+              psql -v ON_ERROR_STOP=1 -v ro_pwd="$RO_PASSWORD" <<SQL
+              DO \$\$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RO_USER}') THEN
+                  EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${RO_USER}', :'ro_pwd');
+                ELSE
+                  EXECUTE format('ALTER  ROLE %I WITH LOGIN PASSWORD %L', '${RO_USER}', :'ro_pwd');
+                END IF;
+              END
+              \$\$;
+
+              GRANT CONNECT ON DATABASE "${PGDATABASE}" TO "${RO_USER}";
+              GRANT USAGE   ON SCHEMA public           TO "${RO_USER}";
+              GRANT SELECT  ON ALL TABLES    IN SCHEMA public TO "${RO_USER}";
+              GRANT SELECT  ON ALL SEQUENCES IN SCHEMA public TO "${RO_USER}";
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES    TO "${RO_USER}";
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO "${RO_USER}";
+              REVOKE CREATE ON SCHEMA public FROM "${RO_USER}";
+
+              \echo '[ro-bootstrap] verification:'
+              SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole
+              FROM pg_roles WHERE rolname = '${RO_USER}';
+              SQL
+
+              echo "[ro-bootstrap] done"
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+{{- end }}
