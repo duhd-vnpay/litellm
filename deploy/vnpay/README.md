@@ -408,6 +408,15 @@ kubectl get hpa -n litellm
 kubectl describe hpa litellm -n litellm   # check scale events
 ```
 
+### Timezone
+
+Container `litellm` chạy với `TZ=Asia/Ho_Chi_Minh` (ICT, UTC+7) — set qua `extraEnvVars` trong [values-litellm-vnpay.yaml](helm/values-litellm-vnpay.yaml). Tác động:
+
+- `date` trong container, log timestamp app, `datetime.now()` trong các hook (audit log, SSO handler) đều ICT.
+- DB columns kiểu `TIMESTAMP WITHOUT TIME ZONE` (LiteLLM_AuditLog, SpendLogs, VerificationToken.created_at, ...) lưu giá trị **local ICT** từ thời điểm set TZ trở đi. Trước 2026-04-23 các row lưu UTC → khi join/sort xuyên thời điểm này, lưu ý gap 7h. Không backfill (ảnh hưởng spend reporting cũ).
+- Cron schedule trong K8s CronJob spec (`schedule: "0 2 * * *"`) **vẫn là UTC** — K8s controller-manager không đọc TZ container. Convert thủ công nếu cần chạy theo giờ Hà Nội (ví dụ 02:00 ICT = 19:00 UTC ngày trước).
+- Splunk HEC payload `time` field nên gửi epoch UTC để tránh ambiguity — `vnpay_splunk_audit.py` đã dùng `datetime.now(timezone.utc).timestamp()`.
+
 ### Health & Monitoring
 
 - **Health CronJob**: `litellm-health-check` — runs */5min, checks liveliness, readiness, PVC usage, 24h spend stats
@@ -478,5 +487,7 @@ kubectl create job -n litellm pg-backup-manual --from=cronjob/litellm-pg-backup
 - **2026-04-21**: Mở rộng `vnpay_premium_unlock` thành "landing pad" cho module-level monkey patch OSS gaps. Thêm patch `_authorize_and_filter_teams` → proxy_admin với `user_id=self` (kiểu UI luôn gọi) trả all teams thay vì filter membership → dropdown Teams trong dialog Policy Attachment hiện đủ 12 teams.
 - **2026-04-21**: Kimi K2.6 integration — đăng ký pricing ($0.95/$4 per MTok, cache hit $0.16) + `supports_reasoning: True` vào routing hook để trigger `fill_reasoning_content()` placeholder injection (Claude Code / Anthropic SDK không round-trip thinking blocks). Đổi logic re-inject từ "only-if-missing" sang force-override mỗi pre_call — fix case DB ProxyModelTable sync ghi `litellm_params.input_cost_per_token=0.0` đè hook. Update model qua API để re-encrypt `litellm_params`. Backfill 88 SpendLogs rows ($2.24) + daily aggregates + cumulative spend cho users/teams/keys.
 - **2026-04-21**: Enable HPA CPU-based autoscaling (minReplicas=2, maxReplicas=6, target 70%) dùng `metrics-server` sẵn có. Traffic hiện tại <2% CPU nên chỉ là preparedness — path nâng cấp sang KEDA + Prometheus request-rate trigger khi cần signal chính xác hơn cho I/O-bound workload.
+- **2026-04-23**: Set `TZ=Asia/Ho_Chi_Minh` cho container litellm (ICT, UTC+7) qua `extraEnvVars` — log timestamp, `datetime.now()` trong hook, app log đều giờ Hà Nội. Helm rev 46. Caveat: K8s CronJob spec.schedule vẫn UTC (controller-manager không đọc TZ container); DB row trước thời điểm này lưu UTC, không backfill.
+- **2026-04-23**: Sync DB router_settings ↔ values YAML 2 chiều (drift 11 vs 3 fallback rule + timeout 300/600 mismatch). Tăng lại `litellm_settings.request_timeout` 600s match WAF/CDN. Thêm note quy trình sync UI → DB → YAML trong README.
 - **2026-04-23**: Fix SSO cookie zombie session — `response.set_cookie("token", ...)` thêm `max_age=8h` khớp `LITELLM_UI_SESSION_DURATION` (trước đó thiếu Max-Age → browser giữ cookie vĩnh viễn, backend token expire 8h nhưng nginx handoff rule `$cookie_token=""` không trigger → UI render empty state thay vì redirect SSO). Cả 2 flow `/teleport-sso` + `/vnpay-sso`. Thêm `secure=True`, `samesite="lax"`; giữ `httponly=False` vì UI đọc cookie qua JS.
 - **2026-04-22**: Rewrite daily backup CronJob để exclude `LiteLLM_SpendLogs` + `LiteLLM_SpendLogToolIndex` (~95% size DB, 2.67GB → SpendLogs retention 7d built-in tự xóa, không cần re-backup mỗi ngày). Backup size 1.4GB → 623KB (-99.96%), duration 5min → 6s. Retention glob refine thành `litellm-backup-[0-9]*.dump` để không đụng milestone dumps (`-pre-userid-migration-*`) và lightweight ad-hoc (`-nospend-*`). Thêm skill `vnpay-litellm-backup-db` để chạy ad-hoc lightweight dump (~500-700KB, <5s) trước các thao tác migration/cleanup.
