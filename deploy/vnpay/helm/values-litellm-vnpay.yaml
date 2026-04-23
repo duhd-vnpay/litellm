@@ -440,6 +440,8 @@ startupProbe:
 # ─── Extra env vars ───────────────────────────────────────────────────────────
 # Format: list [{name, value}] — upstream chart dùng toYaml trực tiếp vào container env
 extraEnvVars:
+  - name: TZ
+    value: "Asia/Ho_Chi_Minh" # ICT UTC+7. Áp lên container → Python datetime.now() + log timestamp + cron hooks dùng giờ Hà Nội. tzdata image debian:slim đã có sẵn /usr/share/zoneinfo/Asia/Ho_Chi_Minh.
   - name: LITELLM_LOG
     value: "INFO" # DEBUG → INFO: giảm CPU/IO đáng kể khi production
   - name: PYTHONPATH
