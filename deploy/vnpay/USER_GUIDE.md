@@ -1,6 +1,6 @@
-# LiteLLM VNPay — User Guide
+# VNPAY LLM Gateway — User Guide
 
-> **Version 1.0** — cập nhật `2026-04-22` · [Changelog](#changelog) · Nguồn chính thức: [github.com/duhd-vnpay/litellm/blob/main/deploy/vnpay/USER_GUIDE.md](https://github.com/duhd-vnpay/litellm/blob/main/deploy/vnpay/USER_GUIDE.md)
+> **Version 1.1** — cập nhật `2026-04-22` · [Changelog](#changelog)
 
 Hướng dẫn end-user sử dụng LLM Gateway VNPAY: đăng nhập, tạo virtual key, xem usage/logs, và cấu hình các dev tool phổ biến trỏ về gateway.
 
@@ -430,7 +430,76 @@ curl https://api-llm.x.vnshop.cloud/v1/chat/completions \
   }'
 ```
 
-### 6.10 Anthropic SDK
+### 6.10 Codex CLI (OpenAI official)
+
+Docs: https://github.com/openai/codex — Codex CLI hỗ trợ custom provider qua `config.toml`, dùng OpenAI-compatible API.
+
+**Install**:
+```bash
+npm install -g @openai/codex
+# hoặc: brew install codex
+```
+
+**Config** — sửa `~/.codex/config.toml` (tạo mới nếu chưa có):
+
+```toml
+# Default model + provider
+model = "moonshot/kimi-k2.6"
+model_provider = "vnpay"
+
+# Tăng context reasoning (optional)
+model_reasoning_effort = "medium"
+
+[model_providers.vnpay]
+name = "VNPay LiteLLM Gateway"
+base_url = "https://api-llm.x.vnshop.cloud/v1"
+env_key = "VNPAY_LITELLM_KEY"
+wire_api = "chat"            # hoặc "responses" nếu dùng Responses API
+# request_max_retries = 4
+# stream_idle_timeout_ms = 300000
+
+# (Optional) provider thứ 2 cho Claude qua Anthropic-compat path
+[model_providers.vnpay-anthropic]
+name = "VNPay Claude"
+base_url = "https://api-llm.x.vnshop.cloud"
+env_key = "VNPAY_LITELLM_KEY"
+wire_api = "chat"
+```
+
+**Set API key** (env var khớp `env_key` trong config):
+
+```bash
+# Linux/macOS
+export VNPAY_LITELLM_KEY="sk-your-virtual-key"
+
+# Windows PowerShell
+$env:VNPAY_LITELLM_KEY = "sk-your-virtual-key"
+```
+
+**Chạy**:
+
+```bash
+# Dùng model/provider mặc định (Kimi K2.6)
+codex
+
+# Override model cho 1 session
+codex --model claude-sonnet-4-6 --config model_provider=vnpay-anthropic
+
+# Non-interactive mode
+codex exec "Refactor function foo in file bar.py"
+```
+
+**Sử dụng trong IDE** (Codex extension VSCode / JetBrains):
+
+Extension đọc `~/.codex/config.toml` + env `VNPAY_LITELLM_KEY` giống CLI. Nếu mở IDE từ GUI (không qua terminal) → set env var ở OS level (xem hướng dẫn mục 6.2) hoặc giữ key trong config file với profile mặc định.
+
+**Lưu ý:**
+- `wire_api = "chat"` → gọi `/v1/chat/completions` (OpenAI format, hoạt động với mọi model gateway hỗ trợ).
+- `wire_api = "responses"` → gọi `/v1/responses` (Responses API mới của OpenAI) — chỉ dùng khi model thực sự hỗ trợ, không khuyên cho Kimi/MiniMax/Claude qua LiteLLM.
+- Model name phải khớp exact với bảng mục 2 — `moonshot/kimi-k2.6`, `claude-sonnet-4-6`, `MiniMax-M2.7`, etc.
+- Kiểm tra nhanh: `codex --model moonshot/kimi-k2.6 exec "say hi"` — nếu 401 thì check `echo $VNPAY_LITELLM_KEY`.
+
+### 6.11 Anthropic SDK
 
 ```python
 from anthropic import Anthropic
@@ -538,5 +607,6 @@ Tạo `.env` hoặc `.claude/settings.json` trong repo → override env vars cho
 | Version | Ngày | Thay đổi |
 |---|---|---|
 | **1.0** | 2026-04-22 | Bản đầu: login flow, danh sách 15 model với benchmark Kimi K2.6, tạo virtual key (UI + CLI), xem usage + logs, cấu hình 10 tools (Claude Code CLI + VSCode/Antigravity, Cline, Cursor, Xcode 26, Android Studio, Qwen Code, Aider, OpenAI/Anthropic SDK), troubleshooting + FAQ |
+| **1.1** | 2026-04-22 | Thêm section 6.10 Codex CLI (OpenAI official) — config `~/.codex/config.toml` với `model_providers.vnpay`, `wire_api = "chat"`, env `VNPAY_LITELLM_KEY` |
 
 **Đề xuất thay đổi**: tạo PR trên fork `duhd-vnpay/litellm` sửa file `deploy/vnpay/USER_GUIDE.md`, hoặc báo `duhd` Viber.
